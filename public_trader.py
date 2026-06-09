@@ -13,8 +13,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
-import yfinance as yf
 from dotenv import load_dotenv
+
+# NOTE: yfinance is imported lazily inside the dividend/earnings helpers so a
+# broken/missing yfinance only degrades those warnings instead of preventing
+# the whole module (and the dashboard that imports it) from loading.
 
 load_dotenv(os.path.expanduser("~/.hermes/.env"), override=True)
 
@@ -293,40 +296,51 @@ class PublicTrader:
             raise ValueError(f"Could not resolve both legs: {buy_strike}/{sell_strike}")
 
         spread_width = sell_strike - buy_strike
-        max_debit = spread_width * contracts * 100
-        max_credit = spread_width * contracts * 100
+        max_value = spread_width * contracts * 100  # spread value if both legs finish ITM
 
         summary_lines = [
             f"CALL DEBIT SPREAD: {contracts} {symbol} {expiration}",
             f"  Buy  {buy_strike}  Call  ({buy_leg['symbol']})",
             f"  Sell {sell_strike}  Call  ({sell_leg['symbol']})",
             f"  Spread width: ${spread_width:.2f}",
-            f"  Max debit: ${max_debit:.2f}  Max credit: ${max_credit:.2f}",
+            f"  Max value at expiry: ${max_value:.2f} (max risk = debit paid; max profit = value − debit)",
             f"  Buy leg bid/ask: {buy_leg['bid']}/{buy_leg['ask']}",
             f"  Sell leg bid/ask: {sell_leg['bid']}/{sell_leg['ask']}",
         ]
         warnings = []
 
-        # Safety: ex-dividend assignment risk
-        ex_div_warning = self._is_itm_and_exdiv(symbol, expiration, buy_strike)
+        # Safety: ex-dividend assignment risk — lives on the SHORT (sell) leg:
+        # only an ITM short call gives its holder a reason to exercise early.
+        ex_div_warning = self._is_itm_and_exdiv(symbol, expiration, sell_strike)
         if ex_div_warning:
             warnings.append(
-                f"WARNING: Ex-dividend {ex_div_warning} — ITM call has early assignment risk "
-                f"on the short leg (call holder may exercise to capture dividend)."
+                f"WARNING: Ex-dividend {ex_div_warning} — short {sell_strike} call is ITM; "
+                f"early assignment risk (holder may exercise to capture the dividend)."
             )
 
         # Safety: earnings risk (IV crush + unpredictable gap moves)
-        earn_date = self._is_near_earnings(symbol, expiration)
-        if earn_date:
-            warnings.append(
-                f"WARNING: Earnings {earn_date} — option expires within ±7 days of "
-                f"earnings. IV crush and gap risk on the short leg."
-            )
+        earn_risk = self._earnings_risk(symbol, expiration)
+        if earn_risk:
+            earn_date, kind = earn_risk
+            if kind == "during_hold":
+                warnings.append(
+                    f"WARNING: Earnings {earn_date} falls INSIDE this trade's holding window "
+                    f"(before expiration {expiration}). Gap and IV-crush risk while you hold."
+                )
+            else:  # imminent
+                warnings.append(
+                    f"WARNING: Earnings {earn_date} is within 7 days — IV is likely elevated "
+                    f"and a gap move is imminent."
+                )
 
         # Safety: strike width / arbitrage protection
         if limit_debit:
             pct_of_width = (limit_debit / spread_width) * 100
             summary_lines.append(f"  Limit debit: ${limit_debit} ({pct_of_width:.1f}% of width)")
+            summary_lines.append(
+                f"  Max risk: ${limit_debit * contracts * 100:.2f}  "
+                f"Max profit: ${(spread_width - limit_debit) * contracts * 100:.2f}"
+            )
             if limit_debit > spread_width * 0.98:
                 warnings.append(
                     f"WARNING: Limit ${limit_debit} is {pct_of_width:.1f}% of spread width "
@@ -742,31 +756,50 @@ class PublicTrader:
             return cached[0]  # still fresh
 
         try:
-            t = yf.Ticker(symbol)
+            import yfinance as yf
 
-            # Primary: info dict (most reliable when populated)
+            t = yf.Ticker(symbol)
+            today = datetime.date.today()
+
+            # Typical gap between ex-div dates from dividend history — used both
+            # to roll stale dates forward and as a standalone estimate.
+            typical_gap = None
+            last_hist_ex = None
+            try:
+                divs = t.dividends
+                if len(divs) >= 2:
+                    last_hist_ex = divs.index[-1].date()
+                    gap = (last_hist_ex - divs.index[-2].date()).days
+                    if 25 <= gap <= 185:  # monthly to semi-annual
+                        typical_gap = gap
+            except Exception:
+                pass
+
+            def roll_forward(d):
+                """Yahoo's exDividendDate is often the most recent PAST date —
+                project it forward by the typical gap until it's upcoming.
+                Returns None (= unknown) if there's no gap to project with."""
+                if d >= today:
+                    return d
+                if not typical_gap:
+                    return None
+                while d < today:
+                    d = d + datetime.timedelta(days=typical_gap)
+                return d
+
+            ex_date = None
             ts = t.info.get("exDividendDate")
             if ts:
                 ex_date = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).date()
-                ex_str = ex_date.isoformat()
-                self._div_cache[symbol] = (ex_str, now)
-                return ex_str
+            elif last_hist_ex is not None:
+                ex_date = last_hist_ex
 
-            # Fallback: estimate from dividend history
-            divs = t.dividends
-            if len(divs) >= 2:
-                last_ex = divs.index[-1].date()
-                prev_ex = divs.index[-2].date()
-                typical_gap = (last_ex - prev_ex).days
-                if 25 <= typical_gap <= 185:  # sensible range (monthly to semi-annual)
-                    next_ex = last_ex + datetime.timedelta(days=typical_gap)
-                    ex_str = next_ex.isoformat()
-                    self._div_cache[symbol] = (ex_str, now)
-                    return ex_str
+            if ex_date is not None:
+                ex_date = roll_forward(ex_date)
 
-            # No dividend data — stock doesn't pay one
-            self._div_cache[symbol] = (None, now)
-            return None
+            ex_str = ex_date.isoformat() if ex_date else None
+            self._div_cache[symbol] = (ex_str, now)
+            return ex_str
 
         except Exception:
             # Network error, rate limit, delisted symbol, etc. — fail safe
@@ -825,6 +858,8 @@ class PublicTrader:
             return cached[0]
 
         try:
+            import yfinance as yf
+
             t = yf.Ticker(symbol)
             ed = t.earnings_dates
             if ed is None or len(ed) == 0:
@@ -835,7 +870,8 @@ class PublicTrader:
             dates = []
             for idx in ed.index:
                 d = idx.date() if hasattr(idx, 'date') else idx
-                if d > today:
+                # >= : earnings TODAY (e.g. after the close) still matter.
+                if d >= today:
                     dates.append(d)
 
             self._earn_cache[symbol] = (dates, now)
@@ -845,24 +881,29 @@ class PublicTrader:
             self._earn_cache[symbol] = (None, now)
             return None
 
-    def _is_near_earnings(self, symbol: str, expiration: str) -> Optional[str]:
-        """Check if the option expiration is within ±7 calendar days of an earnings date.
+    def _earnings_risk(self, symbol: str, expiration: str) -> Optional[tuple]:
+        """Earnings risk for a position held until `expiration`.
 
-        Earnings announcements cause IV crush — selling options across earnings
-        is risky. Returns the nearest earnings date string (ISO format) if within
-        the window, or None if safe.
+        Returns (iso_date, kind) or None:
+          - (date, "during_hold"): earnings lands inside the holding window
+            (today ≤ earnings ≤ expiration) — gap / IV-crush risk while held.
+          - (date, "imminent"): earnings within 7 days of today even though it
+            falls after expiration — IV already elevated, gap imminent.
         """
         earnings = self._get_earnings_dates(symbol)
-        if earnings is None:
+        if not earnings:
             return None  # No earnings data (ETF or error)
 
         exp_date = datetime.datetime.strptime(expiration, "%Y-%m-%d").date()
+        today = datetime.date.today()
+        upcoming = sorted(d for d in earnings if d >= today)
 
-        for earn_date in earnings:
-            delta = abs((exp_date - earn_date).days)
-            if delta <= 7:
-                return earn_date.isoformat()
-
+        for d in upcoming:
+            if d <= exp_date:
+                return d.isoformat(), "during_hold"
+        for d in upcoming:
+            if (d - today).days <= 7:
+                return d.isoformat(), "imminent"
         return None
 
     # ── Lifecycle ────────────────────────────────────────────────────────

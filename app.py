@@ -16,7 +16,11 @@ from datetime import datetime
 from flask import Flask, jsonify, request, render_template, send_from_directory
 
 # ── Import PublicTrader ────────────────────────────────────────────────
+# Hermes path stays on sys.path for public_api_sdk and shared deps, but the
+# repo's own public_trader.py (version-controlled, deployed by cron) must win
+# over any stale copy living in the hermes skills directory.
 sys.path.insert(0, "/home/multi_mind/.hermes/skills/data-science/trading-api")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 
 load_dotenv("/home/multi_mind/.hermes/.env", override=True)
