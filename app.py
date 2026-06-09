@@ -5,6 +5,7 @@ Call debit spread builder with smart auto-increment chaser.
 import os
 import re
 import sys
+import json
 import uuid
 import random
 import threading
@@ -285,6 +286,194 @@ def api_chain():
     # spend cycles formatting puts.
     calls = _chain_calls(t, symbol, expiration)
     return jsonify({"symbol": symbol, "expiration": expiration, "calls": calls})
+
+
+# ── IV rank ────────────────────────────────────────────────────────────
+# Public's API has no historical IV, so we snapshot ATM IV daily (one point
+# per symbol per day) and the rank gets more accurate as history accumulates.
+_IV_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history.json")
+_iv_lock = threading.Lock()
+IV_MIN_DAYS_FOR_RANK = 20      # need this many daily snapshots before ranking
+IV_HISTORY_MAX_DAYS = 380      # keep a bit over a year per symbol
+
+
+def _load_iv_history() -> dict:
+    try:
+        with open(_IV_HISTORY_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _record_iv(symbol: str, iv_pct: float) -> dict:
+    """Store today's IV snapshot and return the symbol's full history."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    with _iv_lock:
+        hist = _load_iv_history()
+        sym_hist = hist.setdefault(symbol, {})
+        sym_hist[today] = round(iv_pct, 2)
+        # Prune to the trailing window.
+        if len(sym_hist) > IV_HISTORY_MAX_DAYS:
+            for d in sorted(sym_hist)[: len(sym_hist) - IV_HISTORY_MAX_DAYS]:
+                sym_hist.pop(d, None)
+        tmp = _IV_HISTORY_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(hist, f)
+        os.replace(tmp, _IV_HISTORY_PATH)
+        return dict(sym_hist)
+
+
+def _extract_iv(leg_data) -> float | None:
+    """Pull implied volatility off a raw chain leg, wherever the SDK puts it."""
+    details = getattr(leg_data, "option_details", None)
+    candidates = [
+        getattr(details, "implied_volatility", None) if details else None,
+        getattr(leg_data, "implied_volatility", None),
+        getattr(getattr(details, "greeks", None), "implied_volatility", None) if details else None,
+        getattr(details, "iv", None) if details else None,
+    ]
+    for v in candidates:
+        if v is None:
+            continue
+        try:
+            iv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if iv <= 0:
+            continue
+        # Normalize to percent: 0.45 → 45.0; 45 stays 45.
+        return iv * 100 if iv < 3 else iv
+    return None
+
+
+def _atm_iv(t, symbol: str) -> tuple[float | None, str, float | None]:
+    """Current ATM implied volatility (%): pick the expiration nearest ~30 DTE
+    and the call strike nearest spot. Returns (iv_pct, expiration, strike)."""
+    q = t.quote(symbol)
+    if not q or not q.get("last"):
+        raise ValueError(f"No quote for {symbol}")
+    spot = float(q["last"])
+
+    exps = t.expirations(symbol)
+    if not exps:
+        raise ValueError(f"No option expirations for {symbol}")
+    now = datetime.now()
+
+    def dte(e):
+        try:
+            return (datetime.strptime(e, "%Y-%m-%d") - now).days
+        except ValueError:
+            return 9999
+
+    # Nearest to 30 days out, but never an already-expired date.
+    valid = [e for e in exps if dte(e) >= 0] or exps
+    target = min(valid, key=lambda e: abs(dte(e) - 30))
+
+    chain = t._get_chain(symbol, target)
+    calls = chain.get("calls", [])
+    if not calls:
+        raise ValueError(f"No calls for {symbol} {target}")
+
+    def strike_of(leg):
+        d = getattr(leg, "option_details", None)
+        return float(d.strike_price) if d else float("inf")
+
+    # Try the ATM leg first, then walk outward in case IV is missing on one leg.
+    for leg in sorted(calls, key=lambda c: abs(strike_of(c) - spot))[:5]:
+        iv = _extract_iv(leg)
+        if iv is not None:
+            return iv, target, strike_of(leg)
+    return None, target, None
+
+
+def _iv_recommendation(iv_rank: float | None, iv_pct: float | None) -> dict:
+    """Action guidance. Prefers rank; falls back to absolute IV when history
+    is still building."""
+    if iv_rank is not None:
+        if iv_rank >= 70:
+            return {
+                "stance": "SELL_PREMIUM",
+                "label": "Rich premium",
+                "text": "IV rank is high — options are expensive. Favor selling: "
+                        "covered calls, rolls for credit, credit spreads. Avoid buying debit spreads.",
+            }
+        if iv_rank >= 30:
+            return {
+                "stance": "NEUTRAL",
+                "label": "Middling",
+                "text": "IV rank is mid-range — no strong edge either way. "
+                        "Trade your directional view; premium is fairly priced.",
+            }
+        return {
+            "stance": "BUY_PREMIUM",
+            "label": "Cheap options",
+            "text": "IV rank is low — options are cheap. Favor debit spreads and buying premium; "
+                    "covered calls collect little here, consider waiting for an IV pop to sell/roll.",
+        }
+    # No rank yet — absolute IV fallback (rough, sector-dependent).
+    if iv_pct is None:
+        return {"stance": "UNKNOWN", "label": "No data", "text": "IV not available from the API for this symbol."}
+    if iv_pct >= 60:
+        return {
+            "stance": "SELL_PREMIUM",
+            "label": "High IV (absolute)",
+            "text": f"ATM IV ≈ {iv_pct:.0f}% is high in absolute terms — selling premium "
+                    "(covered calls / rolls) is favored. Rank will sharpen as history builds.",
+        }
+    if iv_pct >= 30:
+        return {
+            "stance": "NEUTRAL",
+            "label": "Moderate IV (absolute)",
+            "text": f"ATM IV ≈ {iv_pct:.0f}% is moderate. No strong premium edge; "
+                    "rank will sharpen as history builds.",
+        }
+    return {
+        "stance": "BUY_PREMIUM",
+        "label": "Low IV (absolute)",
+        "text": f"ATM IV ≈ {iv_pct:.0f}% is low — premium selling pays little; "
+                "debit structures are relatively cheap. Rank will sharpen as history builds.",
+    }
+
+
+@app.route("/api/ivrank")
+def api_ivrank():
+    symbol = request.args.get("symbol", "").upper().strip()
+    if not symbol:
+        return jsonify({"error": "symbol required"}), 400
+    t = get_trader()
+    try:
+        iv_pct, expiration, strike = _atm_iv(t, symbol)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": f"IV lookup failed: {e}"}), 500
+
+    iv_rank = None
+    n_days = 0
+    hist_low = hist_high = None
+    if iv_pct is not None:
+        sym_hist = _record_iv(symbol, iv_pct)
+        values = list(sym_hist.values())
+        n_days = len(values)
+        hist_low, hist_high = min(values), max(values)
+        if n_days >= IV_MIN_DAYS_FOR_RANK and hist_high > hist_low:
+            iv_rank = round((iv_pct - hist_low) / (hist_high - hist_low) * 100, 1)
+
+    rec = _iv_recommendation(iv_rank, iv_pct)
+    return jsonify(
+        {
+            "symbol": symbol,
+            "iv_pct": round(iv_pct, 2) if iv_pct is not None else None,
+            "iv_rank": iv_rank,
+            "expiration": expiration,
+            "atm_strike": strike,
+            "history_days": n_days,
+            "history_low": hist_low,
+            "history_high": hist_high,
+            "min_days_for_rank": IV_MIN_DAYS_FOR_RANK,
+            "recommendation": rec,
+        }
+    )
 
 
 # ── Spread endpoints ───────────────────────────────────────────────────

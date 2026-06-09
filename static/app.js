@@ -15,6 +15,7 @@ let state = {
   chaserTaskId: null,    // active chaser task, for cancellation
   currentUnderlyingPrice: null,
   rollChain: null,       // target call chain for the roller, by strike
+  lastPositions: [],     // latest /api/account positions (for IV scan + context)
 };
 
 // ── DOM refs ───────────────────────────────────────────────────────────
@@ -82,6 +83,11 @@ const dom = {
   rollIncrement: $('#roll-increment'),
   rollInfo: $('#roll-info'),
   btnPrepareRoll: $('#btn-prepare-roll'),
+  // IV rank
+  ivSymbol: $('#iv-symbol'),
+  btnIvCheck: $('#btn-iv-check'),
+  btnIvScan: $('#btn-iv-scan'),
+  ivResults: $('#iv-results'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -158,7 +164,8 @@ async function loadAccount() {
         .join('');
     }
 
-    // Keep the roller's short-call dropdown in sync.
+    // Keep the roller's short-call dropdown and IV scan in sync.
+    state.lastPositions = pos;
     populateRollPositions(pos);
   } catch (e) {
     console.error('Account load failed:', e);
@@ -682,6 +689,99 @@ async function prepareRoll() {
   }
 }
 
+// ── IV rank ──────────────────────────────────────────────────────────────
+const STANCE_META = {
+  SELL_PREMIUM: { cls: 'iv-sell', icon: '▲' },
+  NEUTRAL:      { cls: 'iv-neutral', icon: '◆' },
+  BUY_PREMIUM:  { cls: 'iv-buy', icon: '▼' },
+  UNKNOWN:      { cls: 'iv-neutral', icon: '?' },
+};
+
+// Unique underlying tickers from current positions (OCC = ticker + 15 chars).
+function positionTickers() {
+  return [...new Set(state.lastPositions.map((p) => p.symbol.slice(0, -15)))];
+}
+
+function hasShortCall(ticker) {
+  return state.lastPositions.some(
+    (p) => p.symbol.slice(0, -15) === ticker &&
+           p.option_type === 'CALL' && Number(p.quantity) < 0
+  );
+}
+
+function renderIvCard(data) {
+  const rec = data.recommendation || {};
+  const meta = STANCE_META[rec.stance] || STANCE_META.UNKNOWN;
+  const hasRank = data.iv_rank != null;
+  const rankPct = hasRank ? Math.min(Math.max(data.iv_rank, 0), 100) : 0;
+
+  let contextNote = '';
+  if (hasShortCall(data.symbol)) {
+    if (rec.stance === 'SELL_PREMIUM') {
+      contextNote = `You hold a short ${data.symbol} call — rolling now collects rich premium.`;
+    } else if (rec.stance === 'BUY_PREMIUM') {
+      contextNote = `You hold a short ${data.symbol} call — buying it back is relatively cheap here; a roll collects little.`;
+    }
+  }
+
+  const rankLine = hasRank
+    ? `<div class="iv-rank-row">
+         <span class="iv-rank-num">${fmt(data.iv_rank, 0)}</span>
+         <div class="iv-rank-bar"><div class="iv-rank-fill ${meta.cls}" style="width:${rankPct}%"></div></div>
+       </div>
+       <p class="iv-sub">IV range ${fmt(data.history_low, 0)}–${fmt(data.history_high, 0)}% · ${data.history_days}d of history</p>`
+    : `<p class="iv-sub">Building history: ${data.history_days}/${data.min_days_for_rank} days — using absolute IV until then.</p>`;
+
+  return `
+    <div class="iv-card">
+      <div class="iv-card-head">
+        <span class="iv-ticker">${data.symbol}</span>
+        <span class="iv-pct">ATM IV ${data.iv_pct != null ? fmt(data.iv_pct, 1) + '%' : '—'}</span>
+        <span class="iv-stance ${meta.cls}">${meta.icon} ${rec.label || ''}</span>
+      </div>
+      ${rankLine}
+      <p class="iv-text">${rec.text || ''}</p>
+      ${contextNote ? `<p class="iv-context">${contextNote}</p>` : ''}
+    </div>`;
+}
+
+async function checkIv(symbol, { append = false } = {}) {
+  symbol = symbol.toUpperCase().trim();
+  if (!symbol) return;
+  if (!append) dom.ivResults.innerHTML = '<p class="text-muted">Checking…</p>';
+  try {
+    const data = await apiFetch(`/ivrank?symbol=${symbol}`);
+    if (append) {
+      dom.ivResults.insertAdjacentHTML('beforeend', renderIvCard(data));
+    } else {
+      dom.ivResults.innerHTML = renderIvCard(data);
+    }
+  } catch (e) {
+    const msg = `<p class="error">IV check failed for ${symbol}: ${e.message}</p>`;
+    if (append) dom.ivResults.insertAdjacentHTML('beforeend', msg);
+    else dom.ivResults.innerHTML = msg;
+  }
+}
+
+async function scanPositionsIv() {
+  const tickers = positionTickers();
+  if (tickers.length === 0) {
+    toast('No positions to scan.', 'error');
+    return;
+  }
+  dom.btnIvScan.disabled = true;
+  dom.btnIvScan.textContent = 'Scanning...';
+  dom.ivResults.innerHTML = '';
+  try {
+    for (const tk of tickers) {
+      await checkIv(tk, { append: true });
+    }
+  } finally {
+    dom.btnIvScan.disabled = false;
+    dom.btnIvScan.textContent = 'Scan Positions';
+  }
+}
+
 // ── Event wiring ───────────────────────────────────────────────────────
 dom.btnFetchChain.addEventListener('click', async () => {
   const sym = dom.symInput.value.trim().toUpperCase();
@@ -740,6 +840,16 @@ dom.btnCancelModal.addEventListener('click', () => hide(dom.preflightModal));
 dom.btnConfirm.addEventListener('click', confirmSpread);
 dom.btnCancelChaser.addEventListener('click', cancelChaser);
 dom.btnCloseChaser.addEventListener('click', closeChaser);
+
+// IV rank wiring
+dom.btnIvCheck.addEventListener('click', () => checkIv(dom.ivSymbol.value));
+dom.btnIvScan.addEventListener('click', scanPositionsIv);
+dom.ivSymbol.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    checkIv(dom.ivSymbol.value);
+  }
+});
 
 // Roller wiring
 dom.rollPosition.addEventListener('change', onRollPositionChange);

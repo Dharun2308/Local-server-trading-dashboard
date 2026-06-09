@@ -103,6 +103,15 @@ header h1 {
   min-width: 0;
 }
 
+/* Left cell stacks positions + IV rank; capped so the IV text wraps instead
+   of widening the column. */
+#left-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 280px;
+}
+
 section {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -407,6 +416,111 @@ select {
 #spread-width-label.invalid {
   color: var(--danger);
   font-weight: 600;
+}
+
+/* ── IV rank panel ───────────────────────────────────────────────────── */
+#iv-panel .field-row {
+  flex-wrap: wrap;
+}
+
+#iv-symbol {
+  width: 90px;
+  text-transform: uppercase;
+}
+
+.iv-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  font-size: 0.8rem;
+}
+
+.iv-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.iv-ticker {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.iv-pct {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.iv-stance {
+  font-weight: 600;
+  font-size: 0.72rem;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(139, 148, 158, 0.15);
+}
+
+.iv-stance.iv-sell { color: var(--success); background: rgba(63, 185, 80, 0.12); }
+.iv-stance.iv-buy { color: var(--accent); background: rgba(88, 166, 255, 0.12); }
+.iv-stance.iv-neutral { color: var(--text-muted); }
+
+.iv-rank-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.iv-rank-num {
+  font-weight: 700;
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+}
+
+.iv-rank-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.iv-rank-fill {
+  height: 100%;
+  border-radius: 5px;
+}
+
+.iv-rank-fill.iv-sell { background: var(--success); }
+.iv-rank-fill.iv-buy { background: var(--accent); }
+.iv-rank-fill.iv-neutral { background: var(--text-muted); }
+
+.iv-sub {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  margin-bottom: 4px;
+}
+
+.iv-text {
+  line-height: 1.45;
+}
+
+.iv-context {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--warning);
+  background: rgba(210, 153, 29, 0.08);
+  color: var(--warning);
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.text-muted {
+  color: var(--text-muted);
 }
 
 /* ── Covered call roller ─────────────────────────────────────────────── */

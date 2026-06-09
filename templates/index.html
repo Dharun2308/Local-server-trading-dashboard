@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Public Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=7" />
+  <link rel="stylesheet" href="/static/style.css?v=8" />
 </head>
 <body>
   <!-- HEADER -->
@@ -20,7 +20,8 @@
   </header>
 
   <div id="main-grid">
-    <!-- LEFT: Positions -->
+    <!-- LEFT: Positions + IV Rank -->
+    <div id="left-column">
     <section id="positions-panel">
       <h2>Positions</h2>
       <div id="positions-header" class="positions-grid positions-header hidden">
@@ -30,6 +31,17 @@
       </div>
       <div id="positions-list" class="loading">Loading...</div>
     </section>
+
+    <section id="iv-panel">
+      <h2>IV Rank</h2>
+      <div class="field-row">
+        <input type="text" id="iv-symbol" placeholder="e.g. RIVN" maxlength="6" />
+        <button id="btn-iv-check" class="btn primary">Check</button>
+        <button id="btn-iv-scan" class="btn">Scan Positions</button>
+      </div>
+      <div id="iv-results"></div>
+    </section>
+    </div>
 
     <!-- RIGHT: stacked panels -->
     <div id="right-column">

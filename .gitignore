@@ -2,6 +2,9 @@
 cert.pem
 key.pem
 
+# Runtime data (IV snapshots accumulate on the server)
+iv_history.json
+
 # Python
 __pycache__/
 *.pyc
