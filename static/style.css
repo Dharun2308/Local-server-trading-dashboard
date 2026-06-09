@@ -89,7 +89,8 @@ header h1 {
 /* ── Grid ────────────────────────────────────────────────────────────── */
 #main-grid {
   display: grid;
-  grid-template-columns: 1fr 2fr;
+  /* Left column hugs the positions table; the right column takes the rest. */
+  grid-template-columns: max-content 1fr;
   gap: 16px;
   align-items: start;
 }
@@ -130,10 +131,10 @@ section h2 {
 
 .positions-grid {
   display: grid;
-  /* Fixed, content-sized columns packed to the left so values sit close to
-     the symbol instead of spanning the whole panel. */
-  grid-template-columns: 11em 2.3em 4em;
-  column-gap: 12px;
+  /* Fixed columns in rem (not em) so the header and rows align despite their
+     different font sizes, and packed left so values hug the symbol. */
+  grid-template-columns: 7.5rem 1.8rem 3rem;
+  column-gap: 14px;
   justify-content: start;
   align-items: center;
 }
