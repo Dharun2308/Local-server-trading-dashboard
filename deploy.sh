@@ -18,7 +18,7 @@ if [ "$before" != "$after" ]; then
     echo "=== Restarting dashboard ==="
     fuser -k 8090/tcp 2>/dev/null || true
     sleep 1
-    ~/.hermes/hermes-agent/venv/bin/python3 -u app.py &
+    nohup ~/.hermes/hermes-agent/venv/bin/python3 -u app.py > /dev/null 2>&1 &
     echo "=== Dashboard deployed ==="
 fi
 # Silent exit when no changes — nothing delivered to user
