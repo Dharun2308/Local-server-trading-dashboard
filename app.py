@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import uuid
+import random
 import threading
 import time
 from decimal import Decimal
@@ -30,6 +31,47 @@ _trader_lock = threading.Lock()
 # Chaser task tracking: task_id → status dict
 _chaser_tasks: dict = {}
 _chaser_lock = threading.Lock()
+
+# Cleanup / expiry bookkeeping
+_token_created: dict = {}        # prepare token → epoch when prepared
+_task_ended: dict = {}           # task_id → epoch when it reached a terminal state
+
+TOKEN_TTL_SEC = 300              # prepared spreads expire after 5 minutes
+TASK_RETENTION_SEC = 3600        # finished chaser tasks kept for 1 hour, then evicted
+SWEEP_INTERVAL_SEC = 60          # how often the background sweeper runs
+
+
+def _sweep_loop():
+    """Background daemon: evict finished chaser tasks and expire stale tokens."""
+    terminal = ("FILLED", "EXPIRED", "ERROR")
+    while True:
+        time.sleep(SWEEP_INTERVAL_SEC)
+        now = time.time()
+
+        # Evict finished tasks past their retention window. A task's clock
+        # starts the first time the sweeper observes it in a terminal state.
+        with _chaser_lock:
+            for tid, task in list(_chaser_tasks.items()):
+                if task.get("status") in terminal:
+                    ended = _task_ended.setdefault(tid, now)
+                    if now - ended > TASK_RETENTION_SEC:
+                        _chaser_tasks.pop(tid, None)
+                        _task_ended.pop(tid, None)
+
+        # Expire stale prepared tokens (and drop them from the trader).
+        trader = _trader  # don't force lazy-init from the sweeper
+        for token, created in list(_token_created.items()):
+            if now - created > TOKEN_TTL_SEC:
+                _token_created.pop(token, None)
+                if trader is not None:
+                    try:
+                        trader._pending.pop(token, None)
+                    except Exception:
+                        pass
+
+
+_sweeper_thread = threading.Thread(target=_sweep_loop, daemon=True)
+_sweeper_thread.start()
 
 
 def get_trader() -> PublicTrader:
@@ -194,9 +236,10 @@ def api_chain():
             },
         }
 
+    # Only calls are rendered by the UI (call debit spread builder), so don't
+    # spend cycles formatting puts.
     calls = [fmt_leg(c) for c in chain.get("calls", [])]
-    puts = [fmt_leg(p) for p in chain.get("puts", [])]
-    return jsonify({"symbol": symbol, "expiration": expiration, "calls": calls, "puts": puts})
+    return jsonify({"symbol": symbol, "expiration": expiration, "calls": calls})
 
 
 # ── Spread endpoints ───────────────────────────────────────────────────
@@ -229,6 +272,8 @@ def api_spread_prepare():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+    _token_created[po.token] = time.time()
+
     return jsonify(
         {
             "token": po.token,
@@ -260,6 +305,18 @@ def api_spread_confirm():
     if po.status != "PENDING":
         return jsonify({"error": f"Cannot confirm — order is {po.status}"}), 400
 
+    # Reject stale prices: a prepared spread is only valid for TOKEN_TTL_SEC.
+    created = _token_created.get(token)
+    if created is None or (time.time() - created) > TOKEN_TTL_SEC:
+        _token_created.pop(token, None)
+        t._pending.pop(token, None)
+        return jsonify(
+            {"error": "Prepared spread expired (prices may be stale). Re-prepare the spread."}
+        ), 400
+
+    # Token is being consumed — drop it so it can't be reused or swept later.
+    _token_created.pop(token, None)
+
     task_id = uuid.uuid4().hex[:12]
 
     # Initialize task status
@@ -275,6 +332,7 @@ def api_spread_confirm():
             "started_at": datetime.now().isoformat(),
             "filled_at": None,
             "error": None,
+            "last_warning": None,
             "final_limit": None,
         }
 
@@ -308,8 +366,6 @@ def api_spread_status(task_id):
 
 def _categorize_chaser_error(error: str) -> dict:
     """Categorize chaser API errors into user-friendly messages and fatal flags."""
-    import re
-
     # Insufficient buying power
     bp_match = re.search(r"need an additional \$([\d,.]+) to cover", error)
     if bp_match:
@@ -428,6 +484,7 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         escalation = Decimal("0.05")
         max_cycles = 20
         poll_interval = 5
+        max_consecutive_errors = 5  # bail if the API keeps failing non-fatally
 
         # Hard ceiling: can't exceed spread width, or user-defined cap
         spread_width = Decimal(str(pf["sell_strike"] - pf["buy_strike"]))
@@ -435,6 +492,8 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         if max_cap is not None:
             user_cap = Decimal(str(max_cap))
             ceiling = min(ceiling, user_cap)
+
+        consecutive_errors = 0
 
         for cycle in range(1, max_cycles + 1):
             # Enforce ceiling
@@ -445,21 +504,57 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_limit))
 
-            req.limit_price = current_limit
-            order = t.client.place_multileg_order(req, account_id=t.account_id)
-            placed_order_id = order.order_id
+            # Place + poll inside a try so transient (non-fatal) API errors can
+            # be retried instead of killing the whole chaser thread.
+            try:
+                req.limit_price = current_limit
+                order = t.client.place_multileg_order(req, account_id=t.account_id)
+                placed_order_id = order.order_id
 
-            with _chaser_lock:
-                _chaser_tasks[task_id]["order_id"] = placed_order_id
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["order_id"] = placed_order_id
 
-            time.sleep(poll_interval)
+                # Jitter the poll so concurrent chasers don't sync up and
+                # hammer the API on the same beat.
+                time.sleep(poll_interval + random.uniform(0, 1))
 
-            detail = t.client.get_order(placed_order_id, account_id=t.account_id)
-            status = (
-                detail.status.value
-                if hasattr(detail.status, "value")
-                else str(detail.status)
-            )
+                detail = t.client.get_order(placed_order_id, account_id=t.account_id)
+                status = (
+                    detail.status.value
+                    if hasattr(detail.status, "value")
+                    else str(detail.status)
+                )
+            except Exception as cycle_err:
+                info = _categorize_chaser_error(str(cycle_err))
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["last_warning"] = info["message"]
+
+                # Fatal errors (e.g. insufficient funds) can't be retried —
+                # stop immediately and surface the categorized message.
+                if info["fatal"]:
+                    with _chaser_lock:
+                        _chaser_tasks[task_id]["status"] = "ERROR"
+                        _chaser_tasks[task_id]["error"] = info
+                    return
+
+                # Non-fatal: retry at the same limit (don't escalate on an
+                # error — the order never went live), but give up if the API
+                # keeps failing.
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    with _chaser_lock:
+                        _chaser_tasks[task_id]["status"] = "ERROR"
+                        info["message"] = (
+                            f"Gave up after {consecutive_errors} consecutive errors. "
+                            + info["message"]
+                        )
+                        _chaser_tasks[task_id]["error"] = info
+                    return
+                time.sleep(poll_interval)
+                continue
+
+            # Successful round-trip — reset the non-fatal error streak.
+            consecutive_errors = 0
 
             if status == "FILLED":
                 with _chaser_lock:
