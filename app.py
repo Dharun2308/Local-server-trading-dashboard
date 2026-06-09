@@ -9,7 +9,7 @@ import uuid
 import random
 import threading
 import time
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
 
 from flask import Flask, jsonify, request, render_template, send_from_directory
@@ -777,6 +777,9 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
             # Place + poll inside a try so transient (non-fatal) API errors can
             # be retried instead of killing the whole chaser thread.
             try:
+                # Fresh client order id per placement — order_id is an idempotency
+                # key, so reusing it makes later cycles no-op to the first order.
+                req.order_id = str(uuid.uuid4())
                 req.limit_price = current_limit
                 order = t.client.place_multileg_order(req, account_id=t.account_id)
                 placed_order_id = order.order_id
@@ -954,7 +957,11 @@ def _run_roll_chaser_thread(task_id: str, token: str):
         consecutive_errors = 0
 
         # One price level per step from start down to the floor (inclusive).
-        steps = int((start_credit - floor_credit) / step) if step > 0 else 0
+        # Round the step count UP so the floor itself is always offered.
+        if step > 0:
+            steps = int(((start_credit - floor_credit) / step).to_integral_value(rounding=ROUND_CEILING))
+        else:
+            steps = 0
         max_cycles = min(steps + 1, 60)
         with _chaser_lock:
             _chaser_tasks[task_id]["max_cycles"] = max_cycles
@@ -987,6 +994,9 @@ def _run_roll_chaser_thread(task_id: str, token: str):
 
             # Place ONE order at this credit level.
             try:
+                # Fresh client order id per placement — order_id is an idempotency
+                # key, so reusing it makes later cycles no-op to the first order.
+                req.order_id = str(uuid.uuid4())
                 req.limit_price = -current_credit
                 order = t.client.place_multileg_order(req, account_id=t.account_id)
                 placed_order_id = order.order_id
