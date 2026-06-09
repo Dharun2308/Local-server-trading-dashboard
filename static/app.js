@@ -11,6 +11,7 @@ let state = {
   sellStrike: null,
   preparedToken: null,   // token from prepare response
   chaserInterval: null,
+  chaserTaskId: null,    // active chaser task, for cancellation
   currentUnderlyingPrice: null,
 };
 
@@ -21,7 +22,9 @@ const dom = {
   equity: $('#equity'),
   bp: $('#bp'),
   optBp: $('#opt-bp'),
+  updated: $('#updated'),
   badge: $('#connected-badge'),
+  toastContainer: $('#toast-container'),
   // positions
   posList: $('#positions-list'),
   // builder
@@ -62,6 +65,7 @@ const dom = {
   chaserError: $('#chaser-error'),
   chaserDone: $('#chaser-done'),
   chaserFinalLimit: $('#chaser-final-limit'),
+  btnCancelChaser: $('#btn-cancel-chaser'),
   btnCloseChaser: $('#btn-close-chaser'),
 };
 
@@ -80,6 +84,23 @@ function disable(els, yes = true) {
 function show(el) { el.classList.remove('hidden'); }
 function hide(el) { el.classList.add('hidden'); }
 
+// Lightweight non-blocking notifications (replaces alert()).
+function toast(message, type = 'info', timeout = 4500) {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = message;
+  el.addEventListener('click', () => el.remove());
+  dom.toastContainer.appendChild(el);
+  // Force reflow so the entrance transition runs.
+  requestAnimationFrame(() => el.classList.add('show'));
+  if (timeout > 0) {
+    setTimeout(() => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 250);
+    }, timeout);
+  }
+}
+
 async function apiFetch(url, options = {}) {
   const res = await fetch(API + url, options);
   const data = await res.json();
@@ -97,6 +118,7 @@ async function loadAccount() {
     dom.optBp.textContent = fmt(bp['OPTIONS_BUYING_POWER'], 0);
     dom.badge.textContent = '● connected';
     dom.badge.className = 'badge connected';
+    dom.updated.textContent = `updated ${new Date().toLocaleTimeString()}`;
 
     // Render positions
     const pos = data.positions || [];
@@ -127,6 +149,9 @@ async function loadAccount() {
   }
 }
 
+// Refresh account/positions every 20s so equity & P&L don't go stale.
+const ACCOUNT_REFRESH_MS = 20000;
+
 // ── Quote ──────────────────────────────────────────────────────────────
 async function loadQuote(symbol) {
   symbol = symbol.toUpperCase();
@@ -141,6 +166,7 @@ async function loadQuote(symbol) {
     return q;
   } catch (e) {
     console.error('Quote failed:', e);
+    toast(`Quote failed for ${symbol}: ${e.message}`, 'error');
     hide(dom.quoteBar);
     return null;
   }
@@ -163,6 +189,7 @@ async function loadExpirations(symbol) {
     state.chain = null;
   } catch (e) {
     console.error('Expirations failed:', e);
+    toast(`Couldn't load expirations: ${e.message}`, 'error');
   }
 }
 
@@ -177,6 +204,7 @@ async function loadChain(symbol, expiration) {
     show(dom.spreadConfig);
   } catch (e) {
     console.error('Chain failed:', e);
+    toast(`Couldn't load strikes: ${e.message}`, 'error');
   }
 }
 
@@ -191,10 +219,16 @@ function renderChain(calls) {
       (c) => `
     <tr data-strike="${c.strike}" class="strike-row">
       <td class="chk">
-        <input type="radio" name="buy-strike" value="${c.strike}"
-          ${state.buyStrike === c.strike ? 'checked' : ''} />
-        <input type="radio" name="sell-strike" value="${c.strike}"
-          ${state.sellStrike === c.strike ? 'checked' : ''} />
+        <label class="leg-pick leg-buy" title="Buy (long) leg">
+          <input type="radio" name="buy-strike" value="${c.strike}"
+            ${state.buyStrike === c.strike ? 'checked' : ''} />
+          <span>B</span>
+        </label>
+        <label class="leg-pick leg-sell" title="Sell (short) leg">
+          <input type="radio" name="sell-strike" value="${c.strike}"
+            ${state.sellStrike === c.strike ? 'checked' : ''} />
+          <span>S</span>
+        </label>
       </td>
       <td class="col-strike">$${fmt(c.strike, 1)}</td>
       <td>${fmt(c.bid)}</td>
@@ -210,8 +244,8 @@ function renderChain(calls) {
   // Click handler for strike rows
   dom.callsTbody.querySelectorAll('.strike-row').forEach((row) => {
     row.addEventListener('click', (e) => {
-      // Don't trigger on radio clicks (they have their own handler)
-      if (e.target.tagName === 'INPUT') return;
+      // Don't trigger on the leg picker cell (radios/labels handle themselves)
+      if (e.target.closest('.chk')) return;
       const strike = parseFloat(row.dataset.strike);
       if (isNaN(strike)) return;
       // Toggle — if clicking the same row, clear
@@ -267,6 +301,7 @@ function updateSpreadInfo() {
   const sell = state.sellStrike;
   if (buy == null || sell == null) {
     dom.spreadWidthLabel.textContent = 'Width: —';
+    dom.spreadWidthLabel.classList.remove('invalid');
     dom.maxDebitLabel.textContent = 'Max Debit: —';
     return;
   }
@@ -274,6 +309,15 @@ function updateSpreadInfo() {
   const width = sell - buy;
   const contracts = parseInt(dom.contractsInput.value) || 1;
   const maxDebit = width * contracts * 100;
+
+  // For a call debit spread the buy strike must be below the sell strike.
+  if (width <= 0) {
+    dom.spreadWidthLabel.textContent = 'Width: invalid — buy strike must be below sell strike';
+    dom.spreadWidthLabel.classList.add('invalid');
+    dom.maxDebitLabel.textContent = 'Max Debit: —';
+    return;
+  }
+  dom.spreadWidthLabel.classList.remove('invalid');
 
   dom.spreadWidthLabel.textContent = `Width: $${fmt(width)}`;
   dom.maxDebitLabel.textContent = `Max Debit: $${fmt(maxDebit, 0)} (${fmt(width * 100, 0)}/contract)`;
@@ -295,11 +339,11 @@ async function prepareSpread() {
   const limitDebit = limitDebitStr ? parseFloat(limitDebitStr) : null;
 
   if (!symbol || !expiration || isNaN(buyStrike) || isNaN(sellStrike)) {
-    alert('Fill in symbol, expiration, buy strike, and sell strike.');
+    toast('Fill in symbol, expiration, buy strike, and sell strike.', 'error');
     return;
   }
   if (buyStrike >= sellStrike) {
-    alert('Buy strike must be less than sell strike for a debit spread.');
+    toast('Buy strike must be less than sell strike for a debit spread.', 'error');
     return;
   }
 
@@ -334,7 +378,7 @@ async function prepareSpread() {
     }
     show(dom.preflightModal);
   } catch (e) {
-    alert(`Prepare failed: ${e.message}`);
+    toast(`Prepare failed: ${e.message}`, 'error');
   } finally {
     dom.btnPrepare.disabled = false;
     dom.btnPrepare.textContent = 'Prepare Spread';
@@ -364,6 +408,9 @@ async function confirmSpread() {
     show(dom.chaserModal);
     hide(dom.chaserDone);
     hide(dom.chaserError);
+    show(dom.btnCancelChaser);
+    dom.btnCancelChaser.disabled = false;
+    dom.btnCancelChaser.textContent = 'Cancel Order';
 
     dom.chaserMax.textContent = '20';
     dom.chaserCycle.textContent = '0';
@@ -372,13 +419,24 @@ async function confirmSpread() {
     dom.chaserFill.style.width = '0%';
 
     // Start polling
+    state.chaserTaskId = data.task_id;
     state.chaserInterval = setInterval(() => pollChaser(data.task_id), 2000);
   } catch (e) {
-    alert(`Confirm failed: ${e.message}`);
+    toast(`Confirm failed: ${e.message}`, 'error');
   } finally {
     dom.btnConfirm.disabled = false;
     dom.btnConfirm.textContent = 'Confirm & Place';
   }
+}
+
+// Stop polling and tear down the active chaser (called on any terminal state).
+function stopChaser() {
+  if (state.chaserInterval) {
+    clearInterval(state.chaserInterval);
+    state.chaserInterval = null;
+  }
+  state.chaserTaskId = null;
+  hide(dom.btnCancelChaser);
 }
 
 async function pollChaser(taskId) {
@@ -389,24 +447,27 @@ async function pollChaser(taskId) {
     dom.chaserFill.style.width = `${((status.cycle || 0) / 20) * 100}%`;
 
     if (status.status === 'FILLED') {
-      clearInterval(state.chaserInterval);
-      state.chaserInterval = null;
+      stopChaser();
       dom.chaserStatus.textContent = 'Filled!';
       dom.chaserFill.style.width = '100%';
       dom.chaserFinalLimit.textContent = fmt(status.final_limit);
       show(dom.chaserDone);
       loadAccount(); // refresh positions
+    } else if (status.status === 'CANCELLED') {
+      stopChaser();
+      dom.chaserStatus.textContent = 'Cancelled';
+      show(dom.chaserError);
+      dom.chaserError.textContent = 'Order cancelled — no fill.';
+      dom.chaserError.classList.remove('hidden');
     } else if (status.status === 'EXPIRED') {
-      clearInterval(state.chaserInterval);
-      state.chaserInterval = null;
+      stopChaser();
       dom.chaserStatus.textContent = 'Expired — not filled';
       dom.chaserFill.style.width = '100%';
       show(dom.chaserError);
       dom.chaserError.textContent = status.error || 'Not filled after all cycles';
       dom.chaserError.classList.remove('hidden');
     } else if (status.status === 'ERROR') {
-      clearInterval(state.chaserInterval);
-      state.chaserInterval = null;
+      stopChaser();
       // Show friendly error message
       const err = status.error || {};
       const msg = typeof err === 'object' ? err.message : String(err);
@@ -421,11 +482,23 @@ async function pollChaser(taskId) {
   }
 }
 
-function closeChaser() {
-  if (state.chaserInterval) {
-    clearInterval(state.chaserInterval);
-    state.chaserInterval = null;
+async function cancelChaser() {
+  if (!state.chaserTaskId) return;
+  dom.btnCancelChaser.disabled = true;
+  dom.btnCancelChaser.textContent = 'Cancelling...';
+  dom.chaserStatus.textContent = 'Cancelling...';
+  try {
+    await apiFetch(`/spread/cancel/${state.chaserTaskId}`, { method: 'POST' });
+    // The chaser thread will flip to CANCELLED; pollChaser handles the rest.
+  } catch (e) {
+    toast(`Cancel failed: ${e.message}`, 'error');
+    dom.btnCancelChaser.disabled = false;
+    dom.btnCancelChaser.textContent = 'Cancel Order';
   }
+}
+
+function closeChaser() {
+  stopChaser();
   hide(dom.chaserModal);
 }
 
@@ -433,8 +506,15 @@ function closeChaser() {
 dom.btnFetchChain.addEventListener('click', async () => {
   const sym = dom.symInput.value.trim().toUpperCase();
   if (!sym) return;
-  await loadQuote(sym);
-  await loadExpirations(sym);
+  dom.btnFetchChain.disabled = true;
+  dom.btnFetchChain.textContent = 'Loading...';
+  try {
+    await loadQuote(sym);
+    await loadExpirations(sym);
+  } finally {
+    dom.btnFetchChain.disabled = false;
+    dom.btnFetchChain.textContent = 'Fetch Chain';
+  }
 });
 
 dom.btnRefreshQuote.addEventListener('click', async () => {
@@ -448,10 +528,18 @@ dom.expSelect.addEventListener('change', () => {
   if (sym && exp) loadChain(sym, exp);
 });
 
-dom.btnLoadChain.addEventListener('click', () => {
+dom.btnLoadChain.addEventListener('click', async () => {
   const sym = dom.symInput.value.trim().toUpperCase();
   const exp = dom.expSelect.value;
-  if (sym && exp) loadChain(sym, exp);
+  if (!sym || !exp) return;
+  dom.btnLoadChain.disabled = true;
+  dom.btnLoadChain.textContent = 'Loading...';
+  try {
+    await loadChain(sym, exp);
+  } finally {
+    dom.btnLoadChain.disabled = false;
+    dom.btnLoadChain.textContent = 'Load Strikes';
+  }
 });
 
 dom.buyStrikeInput.addEventListener('change', () => {
@@ -470,6 +558,7 @@ dom.limitDebitInput.addEventListener('input', updateSpreadInfo);
 dom.btnPrepare.addEventListener('click', prepareSpread);
 dom.btnCancelModal.addEventListener('click', () => hide(dom.preflightModal));
 dom.btnConfirm.addEventListener('click', confirmSpread);
+dom.btnCancelChaser.addEventListener('click', cancelChaser);
 dom.btnCloseChaser.addEventListener('click', closeChaser);
 
 // Enter key in symbol input triggers fetch
@@ -482,3 +571,4 @@ dom.symInput.addEventListener('keydown', (e) => {
 
 // ── Init ───────────────────────────────────────────────────────────────
 loadAccount();
+setInterval(loadAccount, ACCOUNT_REFRESH_MS);

@@ -324,8 +324,9 @@ select {
 }
 
 #calls-table th.col-select {
-  width: 30px;
+  width: 64px;
   text-align: center;
+  font-size: 0.72rem;
 }
 
 #calls-table th.col-strike {
@@ -358,6 +359,95 @@ select {
 
 .chk {
   text-align: center;
+  white-space: nowrap;
+}
+
+/* Labeled Buy / Sell leg pickers inside the chain table */
+.leg-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  user-select: none;
+}
+
+.leg-pick + .leg-pick {
+  margin-left: 4px;
+}
+
+.leg-pick input {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.leg-buy span {
+  color: var(--positive);
+}
+
+.leg-sell span {
+  color: var(--danger);
+}
+
+.leg-sell input {
+  accent-color: var(--danger);
+}
+
+/* "updated HH:MM:SS" indicator in the account bar */
+.updated {
+  font-size: 0.72rem;
+  font-style: italic;
+  opacity: 0.8;
+}
+
+/* Inline spread-width validation */
+#spread-width-label.invalid {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ── Toasts ──────────────────────────────────────────────────────────── */
+#toast-container {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  max-width: 360px;
+}
+
+.toast {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.toast-error {
+  border-left-color: var(--danger);
+}
+
+.toast-success {
+  border-left-color: var(--success);
 }
 
 /* ── Modal ───────────────────────────────────────────────────────────── */
@@ -678,5 +768,12 @@ select {
   .modal-actions .btn {
     width: 100%;
     text-align: center;
+  }
+
+  #toast-container {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    max-width: none;
   }
 }

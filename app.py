@@ -334,6 +334,7 @@ def api_spread_confirm():
             "error": None,
             "last_warning": None,
             "final_limit": None,
+            "cancel_requested": False,
         }
 
     # Launch chaser in background thread
@@ -362,6 +363,20 @@ def api_spread_status(task_id):
     if not task:
         return jsonify({"error": "Task not found"}), 404
     return jsonify(task)
+
+
+@app.route("/api/spread/cancel/<task_id>", methods=["POST"])
+def api_spread_cancel(task_id):
+    """Request cancellation of a running chaser. The chaser thread pulls any
+    live order and stops on its next check."""
+    with _chaser_lock:
+        task = _chaser_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        if task["status"] != "RUNNING":
+            return jsonify({"error": f"Cannot cancel — task is {task['status']}"}), 400
+        task["cancel_requested"] = True
+    return jsonify({"task_id": task_id, "status": "CANCELLING"})
 
 
 def _categorize_chaser_error(error: str) -> dict:
@@ -496,6 +511,14 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         consecutive_errors = 0
 
         for cycle in range(1, max_cycles + 1):
+            # Honor a cancel request before placing anything new. Any order
+            # from the previous cycle has already been cancelled or resolved.
+            with _chaser_lock:
+                if _chaser_tasks[task_id].get("cancel_requested"):
+                    _chaser_tasks[task_id]["status"] = "CANCELLED"
+                    _chaser_tasks[task_id]["final_limit"] = float(str(current_limit))
+                    return
+
             # Enforce ceiling
             if current_limit > ceiling:
                 current_limit = ceiling
@@ -555,6 +578,20 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
 
             # Successful round-trip — reset the non-fatal error streak.
             consecutive_errors = 0
+
+            # If a cancel arrived while we were waiting, pull the live order
+            # (unless it already filled) and stop.
+            with _chaser_lock:
+                cancel_now = _chaser_tasks[task_id].get("cancel_requested")
+            if cancel_now and status != "FILLED":
+                try:
+                    t.client.cancel_order(placed_order_id, account_id=t.account_id)
+                except Exception:
+                    pass
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["status"] = "CANCELLED"
+                    _chaser_tasks[task_id]["final_limit"] = float(str(current_limit))
+                return
 
             if status == "FILLED":
                 with _chaser_lock:

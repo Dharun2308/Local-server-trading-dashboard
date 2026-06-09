@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Public Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=2" />
+  <link rel="stylesheet" href="/static/style.css?v=3" />
 </head>
 <body>
   <!-- HEADER -->
@@ -14,6 +14,7 @@
       <span class="metric"><strong>Equity:</strong> <span id="equity">—</span></span>
       <span class="metric"><strong>BP:</strong> $<span id="bp">—</span></span>
       <span class="metric"><strong>Options BP:</strong> $<span id="opt-bp">—</span></span>
+      <span id="updated" class="metric updated">—</span>
       <span id="connected-badge" class="badge pending">● connecting</span>
     </div>
   </header>
@@ -66,7 +67,7 @@
           <table id="calls-table">
             <thead>
               <tr>
-                <th class="col-select"></th>
+                <th class="col-select">Buy / Sell</th>
                 <th class="col-strike">Strike</th>
                 <th class="col-bid">Bid</th>
                 <th class="col-mid">Mid</th>
@@ -143,10 +144,14 @@
         <p>Final limit: $<strong id="chaser-final-limit">—</strong></p>
       </div>
       <div class="modal-actions">
+        <button id="btn-cancel-chaser" class="btn danger">Cancel Order</button>
         <button id="btn-close-chaser" class="btn">Close</button>
       </div>
     </div>
   </div>
+
+  <!-- TOASTS -->
+  <div id="toast-container"></div>
 
   <script src="/static/app.js"></script>
 </body>
