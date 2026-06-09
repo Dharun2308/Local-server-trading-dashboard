@@ -35,6 +35,7 @@ _chaser_lock = threading.Lock()
 # Cleanup / expiry bookkeeping
 _token_created: dict = {}        # prepare token → epoch when prepared
 _task_ended: dict = {}           # task_id → epoch when it reached a terminal state
+_roll_pending: dict = {}         # token → covered-call roll parameters
 
 TOKEN_TTL_SEC = 300              # prepared spreads expire after 5 minutes
 TASK_RETENTION_SEC = 3600        # finished chaser tasks kept for 1 hour, then evicted
@@ -63,6 +64,7 @@ def _sweep_loop():
         for token, created in list(_token_created.items()):
             if now - created > TOKEN_TTL_SEC:
                 _token_created.pop(token, None)
+                _roll_pending.pop(token, None)
                 if trader is not None:
                     try:
                         trader._pending.pop(token, None)
@@ -209,6 +211,69 @@ def api_expirations():
     return jsonify({"symbol": symbol, "expirations": exps})
 
 
+def _format_leg(leg_data) -> dict:
+    """Format a single option chain leg into a JSON-friendly dict."""
+    details = leg_data.option_details
+    return {
+        "symbol": leg_data.instrument.symbol,
+        "strike": float(details.strike_price) if details else 0,
+        "bid": float(leg_data.bid) if leg_data.bid else 0,
+        "ask": float(leg_data.ask) if leg_data.ask else 0,
+        "mid": float(details.mid_price) if details else 0,
+        "volume": leg_data.volume or 0,
+        "open_interest": leg_data.open_interest or 0,
+        "greeks": {
+            "delta": str(details.greeks.delta) if details and details.greeks else None,
+            "gamma": str(details.greeks.gamma) if details and details.greeks else None,
+            "theta": str(details.greeks.theta) if details and details.greeks else None,
+            "vega": str(details.greeks.vega) if details and details.greeks else None,
+        },
+    }
+
+
+def _chain_calls(t, symbol: str, expiration: str) -> list:
+    """Formatted call legs for a symbol/expiration."""
+    chain = t._get_chain(symbol, expiration)
+    return [_format_leg(c) for c in chain.get("calls", [])]
+
+
+def _find_call(calls: list, strike: float) -> dict | None:
+    """Find a call leg by strike (float-tolerant)."""
+    for c in calls:
+        if abs(c["strike"] - strike) < 1e-6:
+            return c
+    return None
+
+
+def _detect_increment(legs: list) -> Decimal:
+    """Infer the chaser step size from quote granularity.
+
+    The API doesn't expose option tick size, so we infer it: if any quote
+    shows sub-nickel resolution (e.g. $1.23), the name trades in penny
+    increments → step $0.02; otherwise nickel increments → step $0.05.
+    """
+    for leg in legs:
+        for key in ("bid", "ask", "mid"):
+            v = leg.get(key)
+            if not v:
+                continue
+            cents = round(float(v) * 100)
+            if cents > 0 and cents % 5 != 0:
+                return Decimal("0.02")
+    return Decimal("0.05")
+
+
+def _short_call_contracts(t, occ_symbol: str) -> int | None:
+    """How many contracts of a given short call are held (absolute value)."""
+    port = t.portfolio()
+    for p in port.get("positions", []):
+        sym = p.instrument.symbol if hasattr(p, "instrument") else None
+        if sym == occ_symbol:
+            q = float(p.quantity) if hasattr(p, "quantity") else 0
+            return abs(int(q)) or None
+    return None
+
+
 @app.route("/api/chain")
 def api_chain():
     symbol = request.args.get("symbol", "").upper()
@@ -216,29 +281,9 @@ def api_chain():
     if not symbol or not expiration:
         return jsonify({"error": "symbol and expiration required"}), 400
     t = get_trader()
-    chain = t._get_chain(symbol, expiration)
-
-    def fmt_leg(leg_data):
-        details = leg_data.option_details
-        return {
-            "symbol": leg_data.instrument.symbol,
-            "strike": float(details.strike_price) if details else 0,
-            "bid": float(leg_data.bid) if leg_data.bid else 0,
-            "ask": float(leg_data.ask) if leg_data.ask else 0,
-            "mid": float(details.mid_price) if details else 0,
-            "volume": leg_data.volume or 0,
-            "open_interest": leg_data.open_interest or 0,
-            "greeks": {
-                "delta": str(details.greeks.delta) if details and details.greeks else None,
-                "gamma": str(details.greeks.gamma) if details and details.greeks else None,
-                "theta": str(details.greeks.theta) if details and details.greeks else None,
-                "vega": str(details.greeks.vega) if details and details.greeks else None,
-            },
-        }
-
     # Only calls are rendered by the UI (call debit spread builder), so don't
     # spend cycles formatting puts.
-    calls = [fmt_leg(c) for c in chain.get("calls", [])]
+    calls = _chain_calls(t, symbol, expiration)
     return jsonify({"symbol": symbol, "expiration": expiration, "calls": calls})
 
 
@@ -377,6 +422,208 @@ def api_spread_cancel(task_id):
             return jsonify({"error": f"Cannot cancel — task is {task['status']}"}), 400
         task["cancel_requested"] = True
     return jsonify({"task_id": task_id, "status": "CANCELLING"})
+
+
+# ── Covered-call roll endpoints ────────────────────────────────────────
+@app.route("/api/roll/prepare", methods=["POST"])
+def api_roll_prepare():
+    """Prepare a covered-call roll: buy-to-close an existing short call and
+    sell-to-open a new call for a net credit. Returns a preflight summary."""
+    data = request.get_json() or {}
+    close_symbol = (data.get("close_symbol") or "").upper()
+    target_expiration = data.get("target_expiration", "")
+    target_strike = data.get("target_strike")
+    contracts = data.get("contracts")
+    limit_credit = data.get("limit_credit")
+    min_credit = data.get("min_credit")
+    increment = data.get("increment", "auto")
+
+    if not close_symbol or not target_expiration or target_strike is None:
+        return jsonify(
+            {"error": "close_symbol, target_expiration, target_strike required"}
+        ), 400
+    if limit_credit is None or min_credit is None:
+        return jsonify({"error": "limit_credit and min_credit required"}), 400
+
+    parsed = parse_occ_symbol(close_symbol)
+    if parsed is None:
+        return jsonify({"error": "close_symbol is not a valid option symbol"}), 400
+    if parsed["option_type"] != "CALL":
+        return jsonify({"error": "Rolling is only supported for short CALL positions"}), 400
+    ticker = parsed["ticker"]
+
+    try:
+        limit_credit = round(float(limit_credit), 2)
+        min_credit = round(float(min_credit), 2)
+        target_strike = float(target_strike)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit_credit, min_credit, target_strike must be numbers"}), 400
+
+    if limit_credit <= 0 or min_credit <= 0:
+        return jsonify({"error": "Credits must be positive (this is a credit roll)"}), 400
+    if min_credit > limit_credit:
+        return jsonify({"error": "Floor credit cannot exceed the starting limit credit"}), 400
+
+    t = get_trader()
+    try:
+        target_calls = _chain_calls(t, ticker, target_expiration)
+    except Exception as e:
+        return jsonify({"error": f"Couldn't load target chain: {e}"}), 500
+
+    open_leg = _find_call(target_calls, target_strike)
+    if open_leg is None:
+        return jsonify(
+            {"error": f"No {ticker} ${target_strike:g} call on {target_expiration}"}
+        ), 400
+    open_symbol = open_leg["symbol"]
+
+    if open_symbol == close_symbol:
+        return jsonify({"error": "Target option is identical to the one being closed"}), 400
+
+    # Best-effort estimate of the mid-price credit (for the summary/warnings).
+    close_leg = None
+    close_calls = []
+    try:
+        close_calls = _chain_calls(t, ticker, parsed["expiry"])
+        close_leg = _find_call(close_calls, parsed["strike"])
+    except Exception:
+        close_calls = []
+
+    # Default contract count from the held short position.
+    if contracts is None:
+        contracts = _short_call_contracts(t, close_symbol) or 1
+    try:
+        contracts = int(contracts)
+    except (TypeError, ValueError):
+        return jsonify({"error": "contracts must be an integer"}), 400
+    if contracts <= 0:
+        return jsonify({"error": "contracts must be a positive integer"}), 400
+
+    # Resolve the chaser step size.
+    if increment == "auto":
+        inc = _detect_increment(target_calls + close_calls)
+    else:
+        try:
+            inc = Decimal(str(increment))
+        except Exception:
+            inc = Decimal("0.05")
+        if inc not in (Decimal("0.02"), Decimal("0.05")):
+            inc = Decimal("0.05")
+
+    est_credit = None
+    if close_leg and open_leg["mid"] and close_leg["mid"]:
+        est_credit = round(open_leg["mid"] - close_leg["mid"], 2)
+
+    warnings = []
+    if est_credit is not None and est_credit <= 0:
+        warnings.append(
+            f"At mid prices this roll is a DEBIT (≈ ${est_credit:.2f}), not a credit — "
+            "double-check the target strike/expiration."
+        )
+    elif est_credit is not None and est_credit < min_credit:
+        warnings.append(
+            f"Mid-price credit (≈ ${est_credit:.2f}) is below your floor (${min_credit:.2f}); "
+            "the chaser may walk all the way down without filling."
+        )
+    warnings.append(
+        "Make sure you hold the shares (or the call being closed) to cover the new short call."
+    )
+
+    token = uuid.uuid4().hex
+    _roll_pending[token] = {
+        "ticker": ticker,
+        "close_symbol": close_symbol,
+        "open_symbol": open_symbol,
+        "contracts": contracts,
+        "limit_credit": limit_credit,
+        "min_credit": min_credit,
+        "increment": str(inc),
+    }
+    _token_created[token] = time.time()
+
+    tick_label = "penny ($0.02)" if inc == Decimal("0.02") else "nickel ($0.05)"
+    summary = (
+        f"COVERED CALL ROLL — {ticker}\n"
+        f"  Buy to close:  {parsed['friendly']}\n"
+        f"                 [{close_symbol}]\n"
+        f"  Sell to open:  {ticker} ${target_strike:g}C {target_expiration}\n"
+        f"                 [{open_symbol}]\n"
+        f"  Contracts:     {contracts}\n"
+        f"  Start credit:  ${limit_credit:.2f}\n"
+        f"  Floor credit:  ${min_credit:.2f}\n"
+        f"  Step down:     ${inc} / cycle ({tick_label} increments)\n"
+        + (f"  Est. mid credit: ${est_credit:.2f}\n" if est_credit is not None else "")
+    )
+
+    return jsonify(
+        {
+            "token": token,
+            "summary": summary,
+            "warnings": warnings,
+            "strategy": "COVERED_CALL_ROLL",
+            "symbol": ticker,
+        }
+    )
+
+
+@app.route("/api/roll/confirm", methods=["POST"])
+def api_roll_confirm():
+    """Confirm a prepared roll and launch the credit chaser in the background."""
+    data = request.get_json() or {}
+    token = data.get("token", "")
+    if not token:
+        return jsonify({"error": "token required"}), 400
+
+    info = _roll_pending.get(token)
+    if not info:
+        return jsonify({"error": "Invalid or expired token. Re-prepare the roll."}), 400
+
+    created = _token_created.get(token)
+    if created is None or (time.time() - created) > TOKEN_TTL_SEC:
+        _token_created.pop(token, None)
+        _roll_pending.pop(token, None)
+        return jsonify(
+            {"error": "Prepared roll expired (prices may be stale). Re-prepare the roll."}
+        ), 400
+
+    # Consume the token so it can't be replayed; the chaser owns _roll_pending
+    # from here and clears it when it finishes.
+    _token_created.pop(token, None)
+
+    task_id = uuid.uuid4().hex[:12]
+    with _chaser_lock:
+        _chaser_tasks[task_id] = {
+            "task_id": task_id,
+            "status": "RUNNING",
+            "kind": "roll",
+            "order_id": None,
+            "cycle": 0,
+            "max_cycles": 0,  # set by the chaser once it computes the ladder
+            "current_limit": float(info["limit_credit"]),
+            "escalation": float(info["increment"]),
+            "started_at": datetime.now().isoformat(),
+            "filled_at": None,
+            "error": None,
+            "last_warning": None,
+            "final_limit": None,
+            "cancel_requested": False,
+        }
+
+    thread = threading.Thread(
+        target=_run_roll_chaser_thread,
+        args=(task_id, token),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify(
+        {
+            "task_id": task_id,
+            "symbol": info["ticker"],
+            "strategy": "COVERED_CALL_ROLL",
+            "started_at": _chaser_tasks[task_id]["started_at"],
+        }
+    )
 
 
 def _categorize_chaser_error(error: str) -> dict:
@@ -637,6 +884,191 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         with _chaser_lock:
             _chaser_tasks[task_id]["status"] = "ERROR"
             _chaser_tasks[task_id]["error"] = _categorize_chaser_error(error_msg)
+
+
+def _run_roll_chaser_thread(task_id: str, token: str):
+    """Background thread that walks a covered-call roll DOWN in credit.
+
+    Starts at the user's limit credit and steps down by the detected increment
+    each cycle until the order fills or the floor credit is reached. Credit
+    orders use a NEGATIVE limit price (limit_price = -credit).
+    """
+    try:
+        info = _roll_pending.get(token)
+        if not info:
+            raise ValueError("Token expired")
+        t = get_trader()
+
+        from public_api_sdk import (
+            MultilegOrderRequest,
+            OrderLegRequest,
+            LegInstrument,
+            LegInstrumentType,
+            OpenCloseIndicator,
+            OrderType,
+            OrderSide,
+            TimeInForce,
+            OrderExpirationRequest,
+        )
+
+        contracts = int(info["contracts"])
+        close_sym = info["close_symbol"]
+        open_sym = info["open_symbol"]
+        start_credit = Decimal(str(info["limit_credit"]))
+        floor_credit = Decimal(str(info["min_credit"]))
+        step = Decimal(str(info["increment"]))
+
+        order_id = str(uuid.uuid4())
+        req = MultilegOrderRequest(
+            order_id=order_id,
+            type=OrderType.LIMIT,
+            limit_price=-start_credit,  # credit ⇒ negative limit price
+            expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
+            quantity=contracts,
+            legs=[
+                # Buy to close the existing short call
+                OrderLegRequest(
+                    instrument=LegInstrument(
+                        symbol=close_sym, type=LegInstrumentType.OPTION
+                    ),
+                    side=OrderSide.BUY,
+                    open_close_indicator=OpenCloseIndicator.CLOSE,
+                    ratio_quantity=1,
+                ),
+                # Sell to open the new short call
+                OrderLegRequest(
+                    instrument=LegInstrument(
+                        symbol=open_sym, type=LegInstrumentType.OPTION
+                    ),
+                    side=OrderSide.SELL,
+                    open_close_indicator=OpenCloseIndicator.OPEN,
+                    ratio_quantity=1,
+                ),
+            ],
+        )
+
+        poll_interval = 5
+        max_consecutive_errors = 5
+        consecutive_errors = 0
+
+        # One cycle per credit level from start down to floor (inclusive), capped.
+        steps = int((start_credit - floor_credit) / step) if step > 0 else 0
+        max_cycles = min(steps + 1, 60)
+        with _chaser_lock:
+            _chaser_tasks[task_id]["max_cycles"] = max_cycles
+
+        current_credit = start_credit
+
+        for cycle in range(1, max_cycles + 1):
+            # Honor a cancel request before placing anything new.
+            with _chaser_lock:
+                if _chaser_tasks[task_id].get("cancel_requested"):
+                    _chaser_tasks[task_id]["status"] = "CANCELLED"
+                    _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
+                    return
+
+            # Never offer below the floor.
+            if current_credit < floor_credit:
+                current_credit = floor_credit
+
+            with _chaser_lock:
+                _chaser_tasks[task_id]["cycle"] = cycle
+                _chaser_tasks[task_id]["current_limit"] = float(str(current_credit))
+
+            try:
+                req.limit_price = -current_credit
+                order = t.client.place_multileg_order(req, account_id=t.account_id)
+                placed_order_id = order.order_id
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["order_id"] = placed_order_id
+
+                time.sleep(poll_interval + random.uniform(0, 1))
+
+                detail = t.client.get_order(placed_order_id, account_id=t.account_id)
+                status = (
+                    detail.status.value
+                    if hasattr(detail.status, "value")
+                    else str(detail.status)
+                )
+            except Exception as cycle_err:
+                err_info = _categorize_chaser_error(str(cycle_err))
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["last_warning"] = err_info["message"]
+                if err_info["fatal"]:
+                    with _chaser_lock:
+                        _chaser_tasks[task_id]["status"] = "ERROR"
+                        _chaser_tasks[task_id]["error"] = err_info
+                    return
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    with _chaser_lock:
+                        _chaser_tasks[task_id]["status"] = "ERROR"
+                        err_info["message"] = (
+                            f"Gave up after {consecutive_errors} consecutive errors. "
+                            + err_info["message"]
+                        )
+                        _chaser_tasks[task_id]["error"] = err_info
+                    return
+                time.sleep(poll_interval)
+                continue
+
+            consecutive_errors = 0
+
+            # Cancel that arrived during the poll window.
+            with _chaser_lock:
+                cancel_now = _chaser_tasks[task_id].get("cancel_requested")
+            if cancel_now and status != "FILLED":
+                try:
+                    t.client.cancel_order(placed_order_id, account_id=t.account_id)
+                except Exception:
+                    pass
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["status"] = "CANCELLED"
+                    _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
+                return
+
+            if status == "FILLED":
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["status"] = "FILLED"
+                    _chaser_tasks[task_id]["filled_at"] = datetime.now().isoformat()
+                    _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
+                return
+
+            if status in ("CANCELLED", "REJECTED"):
+                if status != "CANCELLED":
+                    try:
+                        t.client.cancel_order(placed_order_id, account_id=t.account_id)
+                    except Exception:
+                        pass
+                if current_credit <= floor_credit:
+                    continue  # already resting at the floor; let cycles exhaust
+                current_credit -= step
+                continue
+
+            # Still open — cancel and step the credit down.
+            try:
+                t.client.cancel_order(placed_order_id, account_id=t.account_id)
+            except Exception:
+                pass
+            if current_credit <= floor_credit:
+                continue
+            current_credit -= step
+
+        # Walked down to the floor without filling.
+        with _chaser_lock:
+            _chaser_tasks[task_id]["status"] = "EXPIRED"
+            _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
+            _chaser_tasks[task_id]["error"] = (
+                f"Not filled down to floor credit ${floor_credit}."
+            )
+
+    except Exception as e:
+        with _chaser_lock:
+            _chaser_tasks[task_id]["status"] = "ERROR"
+            _chaser_tasks[task_id]["error"] = _categorize_chaser_error(str(e))
+    finally:
+        # Release the prepared-roll record regardless of outcome.
+        _roll_pending.pop(token, None)
 
 
 # ── Main ────────────────────────────────────────────────────────────────

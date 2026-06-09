@@ -91,6 +91,15 @@ header h1 {
   display: grid;
   grid-template-columns: 1fr 2fr;
   gap: 16px;
+  align-items: start;
+}
+
+/* The right grid cell stacks the spread builder and the roller. */
+#right-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 
 section {
@@ -408,6 +417,20 @@ select {
 #spread-width-label.invalid {
   color: var(--danger);
   font-weight: 600;
+}
+
+/* ── Covered call roller ─────────────────────────────────────────────── */
+#roll-info {
+  font-size: 0.8rem;
+}
+
+#roll-info.invalid {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+#roller-panel select {
+  max-width: 220px;
 }
 
 /* ── Toasts ──────────────────────────────────────────────────────────── */

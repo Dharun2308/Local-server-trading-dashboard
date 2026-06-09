@@ -10,9 +10,11 @@ let state = {
   buyStrike: null,       // selected from table or typed
   sellStrike: null,
   preparedToken: null,   // token from prepare response
+  preparedKind: null,    // 'spread' | 'roll' — routes the confirm call
   chaserInterval: null,
   chaserTaskId: null,    // active chaser task, for cancellation
   currentUnderlyingPrice: null,
+  rollChain: null,       // target call chain for the roller, by strike
 };
 
 // ── DOM refs ───────────────────────────────────────────────────────────
@@ -67,6 +69,18 @@ const dom = {
   chaserFinalLimit: $('#chaser-final-limit'),
   btnCancelChaser: $('#btn-cancel-chaser'),
   btnCloseChaser: $('#btn-close-chaser'),
+  // roller
+  rollPosition: $('#roll-position'),
+  btnRollRefresh: $('#btn-roll-refresh'),
+  rollConfig: $('#roll-config'),
+  rollExp: $('#roll-exp'),
+  rollStrike: $('#roll-strike'),
+  rollContracts: $('#roll-contracts'),
+  rollLimitCredit: $('#roll-limit-credit'),
+  rollMinCredit: $('#roll-min-credit'),
+  rollIncrement: $('#roll-increment'),
+  rollInfo: $('#roll-info'),
+  btnPrepareRoll: $('#btn-prepare-roll'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -142,10 +156,46 @@ async function loadAccount() {
         })
         .join('');
     }
+
+    // Keep the roller's short-call dropdown in sync.
+    populateRollPositions(pos);
   } catch (e) {
     console.error('Account load failed:', e);
     dom.badge.textContent = '● error';
     dom.badge.className = 'badge error';
+  }
+}
+
+// Populate the roller dropdown with short call positions (qty < 0),
+// preserving the current selection across the 20s refresh.
+function populateRollPositions(positions) {
+  const shorts = (positions || []).filter(
+    (p) => p.option_type === 'CALL' && Number(p.quantity) < 0
+  );
+  const prev = dom.rollPosition.value;
+
+  if (shorts.length === 0) {
+    dom.rollPosition.innerHTML = '<option value="">— No short calls —</option>';
+    dom.rollPosition.disabled = true;
+    return;
+  }
+
+  dom.rollPosition.innerHTML =
+    '<option value="">— Select short call —</option>' +
+    shorts
+      .map((p) => {
+        const qty = Math.abs(Number(p.quantity));
+        const label = `${p.friendly || p.symbol} (×${qty})`;
+        // OCC symbol = ticker + 6-digit date + C/P + 8-digit strike (15 chars).
+        const ticker = p.symbol.slice(0, -15);
+        return `<option value="${p.symbol}" data-ticker="${ticker}" data-qty="${qty}">${label}</option>`;
+      })
+      .join('');
+  dom.rollPosition.disabled = false;
+
+  // Restore prior selection if it still exists.
+  if (prev && shorts.some((p) => p.symbol === prev)) {
+    dom.rollPosition.value = prev;
   }
 }
 
@@ -364,19 +414,7 @@ async function prepareSpread() {
       }),
     });
 
-    state.preparedToken = data.token;
-
-    // Show preflight modal
-    dom.preflightSummary.textContent = data.summary;
-    if (data.warnings && data.warnings.length > 0) {
-      dom.preflightWarnings.innerHTML = data.warnings
-        .map((w) => `<p>⚠ ${w}</p>`)
-        .join('');
-      show(dom.preflightWarnings);
-    } else {
-      hide(dom.preflightWarnings);
-    }
-    show(dom.preflightModal);
+    showPreflight(data, 'spread');
   } catch (e) {
     toast(`Prepare failed: ${e.message}`, 'error');
   } finally {
@@ -385,19 +423,41 @@ async function prepareSpread() {
   }
 }
 
+// Render the preflight modal for either a spread or a roll.
+function showPreflight(data, kind) {
+  state.preparedToken = data.token;
+  state.preparedKind = kind;
+  dom.preflightSummary.textContent = data.summary;
+  if (data.warnings && data.warnings.length > 0) {
+    dom.preflightWarnings.innerHTML = data.warnings
+      .map((w) => `<p>⚠ ${w}</p>`)
+      .join('');
+    show(dom.preflightWarnings);
+  } else {
+    hide(dom.preflightWarnings);
+  }
+  show(dom.preflightModal);
+}
+
 // ── Confirm & chaser ───────────────────────────────────────────────────
 async function confirmSpread() {
   if (!state.preparedToken) return;
 
+  const isRoll = state.preparedKind === 'roll';
   dom.btnConfirm.disabled = true;
   dom.btnConfirm.textContent = 'Placing...';
 
   try {
-    const capVal = dom.maxCapInput.value;
     const body = { token: state.preparedToken };
-    if (capVal) body.max_cap = parseFloat(capVal);
+    let endpoint = '/spread/confirm';
+    if (isRoll) {
+      endpoint = '/roll/confirm';
+    } else {
+      const capVal = dom.maxCapInput.value;
+      if (capVal) body.max_cap = parseFloat(capVal);
+    }
 
-    const data = await apiFetch('/spread/confirm', {
+    const data = await apiFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -412,7 +472,7 @@ async function confirmSpread() {
     dom.btnCancelChaser.disabled = false;
     dom.btnCancelChaser.textContent = 'Cancel Order';
 
-    dom.chaserMax.textContent = '20';
+    dom.chaserMax.textContent = isRoll ? '—' : '20';
     dom.chaserCycle.textContent = '0';
     dom.chaserLimit.textContent = '—';
     dom.chaserStatus.textContent = 'Running...';
@@ -442,9 +502,11 @@ function stopChaser() {
 async function pollChaser(taskId) {
   try {
     const status = await apiFetch(`/spread/status/${taskId}`);
+    const maxCycles = status.max_cycles || 20;
     dom.chaserCycle.textContent = status.cycle || 0;
+    dom.chaserMax.textContent = maxCycles;
     dom.chaserLimit.textContent = fmt(status.current_limit);
-    dom.chaserFill.style.width = `${((status.cycle || 0) / 20) * 100}%`;
+    dom.chaserFill.style.width = `${Math.min((status.cycle || 0) / maxCycles, 1) * 100}%`;
 
     if (status.status === 'FILLED') {
       stopChaser();
@@ -500,6 +562,121 @@ async function cancelChaser() {
 function closeChaser() {
   stopChaser();
   hide(dom.chaserModal);
+}
+
+// ── Covered call roller ──────────────────────────────────────────────────
+function selectedRollPosition() {
+  const opt = dom.rollPosition.selectedOptions[0];
+  if (!opt || !opt.value) return null;
+  return { symbol: opt.value, ticker: opt.dataset.ticker, qty: Number(opt.dataset.qty) };
+}
+
+async function onRollPositionChange() {
+  const sel = selectedRollPosition();
+  state.rollChain = null;
+  dom.rollStrike.innerHTML = '<option value="">— Load expiration —</option>';
+  dom.rollStrike.disabled = true;
+  dom.rollInfo.textContent = 'Pick a target strike to see its mid.';
+  dom.rollInfo.classList.remove('invalid');
+  if (!sel) {
+    hide(dom.rollConfig);
+    return;
+  }
+  show(dom.rollConfig);
+  dom.rollContracts.value = sel.qty || 1;
+  dom.rollContracts.max = sel.qty || 100;
+
+  dom.rollExp.disabled = true;
+  dom.rollExp.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const data = await apiFetch(`/expirations?symbol=${sel.ticker}`);
+    dom.rollExp.innerHTML =
+      '<option value="">— Select —</option>' +
+      data.expirations.map((e) => `<option value="${e}">${e}</option>`).join('');
+    dom.rollExp.disabled = false;
+  } catch (e) {
+    dom.rollExp.innerHTML = '<option value="">— Select —</option>';
+    toast(`Couldn't load expirations: ${e.message}`, 'error');
+  }
+}
+
+async function onRollExpChange() {
+  const sel = selectedRollPosition();
+  const exp = dom.rollExp.value;
+  state.rollChain = null;
+  dom.rollStrike.innerHTML = '<option value="">— Select —</option>';
+  dom.rollStrike.disabled = true;
+  if (!sel || !exp) return;
+
+  dom.rollStrike.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const data = await apiFetch(`/chain?symbol=${sel.ticker}&expiration=${exp}`);
+    const calls = data.calls || [];
+    state.rollChain = {};
+    calls.forEach((c) => { state.rollChain[c.strike] = c; });
+    dom.rollStrike.innerHTML =
+      '<option value="">— Select strike —</option>' +
+      calls
+        .map((c) => `<option value="${c.strike}">$${fmt(c.strike, 1)} (mid ${fmt(c.mid)})</option>`)
+        .join('');
+    dom.rollStrike.disabled = false;
+  } catch (e) {
+    dom.rollStrike.innerHTML = '<option value="">— Select —</option>';
+    toast(`Couldn't load strikes: ${e.message}`, 'error');
+  }
+}
+
+function onRollStrikeChange() {
+  const strike = parseFloat(dom.rollStrike.value);
+  if (isNaN(strike) || !state.rollChain) {
+    dom.rollInfo.textContent = 'Pick a target strike to see its mid.';
+    return;
+  }
+  const leg = state.rollChain[strike];
+  if (leg) {
+    dom.rollInfo.textContent =
+      `Target $${fmt(strike, 1)}C — mid $${fmt(leg.mid)} (bid $${fmt(leg.bid)} / ask $${fmt(leg.ask)})`;
+  }
+}
+
+async function prepareRoll() {
+  const sel = selectedRollPosition();
+  const exp = dom.rollExp.value;
+  const strike = parseFloat(dom.rollStrike.value);
+  const contracts = parseInt(dom.rollContracts.value) || 1;
+  const limitCredit = parseFloat(dom.rollLimitCredit.value);
+  const minCredit = parseFloat(dom.rollMinCredit.value);
+  const increment = dom.rollIncrement.value;
+
+  if (!sel) { toast('Select a short call to roll.', 'error'); return; }
+  if (!exp || isNaN(strike)) { toast('Select a target expiration and strike.', 'error'); return; }
+  if (isNaN(limitCredit) || isNaN(minCredit)) { toast('Enter both limit and floor credit.', 'error'); return; }
+  if (limitCredit <= 0 || minCredit <= 0) { toast('Credits must be positive.', 'error'); return; }
+  if (minCredit > limitCredit) { toast('Floor credit cannot exceed the limit credit.', 'error'); return; }
+
+  dom.btnPrepareRoll.disabled = true;
+  dom.btnPrepareRoll.textContent = 'Preparing...';
+  try {
+    const data = await apiFetch('/roll/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        close_symbol: sel.symbol,
+        target_expiration: exp,
+        target_strike: strike,
+        contracts,
+        limit_credit: limitCredit,
+        min_credit: minCredit,
+        increment,
+      }),
+    });
+    showPreflight(data, 'roll');
+  } catch (e) {
+    toast(`Prepare roll failed: ${e.message}`, 'error');
+  } finally {
+    dom.btnPrepareRoll.disabled = false;
+    dom.btnPrepareRoll.textContent = 'Prepare Roll';
+  }
 }
 
 // ── Event wiring ───────────────────────────────────────────────────────
@@ -560,6 +737,13 @@ dom.btnCancelModal.addEventListener('click', () => hide(dom.preflightModal));
 dom.btnConfirm.addEventListener('click', confirmSpread);
 dom.btnCancelChaser.addEventListener('click', cancelChaser);
 dom.btnCloseChaser.addEventListener('click', closeChaser);
+
+// Roller wiring
+dom.rollPosition.addEventListener('change', onRollPositionChange);
+dom.rollExp.addEventListener('change', onRollExpChange);
+dom.rollStrike.addEventListener('change', onRollStrikeChange);
+dom.btnPrepareRoll.addEventListener('click', prepareRoll);
+dom.btnRollRefresh.addEventListener('click', loadAccount);
 
 // Enter key in symbol input triggers fetch
 dom.symInput.addEventListener('keydown', (e) => {

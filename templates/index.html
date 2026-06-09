@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Public Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=4" />
 </head>
 <body>
   <!-- HEADER -->
@@ -31,7 +31,8 @@
       <div id="positions-list" class="loading">Loading...</div>
     </section>
 
-    <!-- RIGHT: Spread Builder -->
+    <!-- RIGHT: stacked panels -->
+    <div id="right-column">
     <section id="builder-panel">
       <h2>Call Debit Spread Builder</h2>
 
@@ -113,6 +114,65 @@
         <button id="btn-prepare" class="btn primary">Prepare Spread</button>
       </div>
     </section>
+
+    <!-- Covered Call Roller -->
+    <section id="roller-panel">
+      <h2>Covered Call Roller</h2>
+
+      <div class="field-row">
+        <label>
+          Short Call to Roll
+          <select id="roll-position" disabled>
+            <option value="">— No short calls —</option>
+          </select>
+        </label>
+        <button id="btn-roll-refresh" class="btn">Refresh</button>
+      </div>
+
+      <div id="roll-config" class="hidden">
+        <div class="field-row">
+          <label>
+            Target Expiration
+            <select id="roll-exp" disabled>
+              <option value="">— Select —</option>
+            </select>
+          </label>
+          <label>
+            Target Strike
+            <select id="roll-strike" disabled>
+              <option value="">— Load expiration —</option>
+            </select>
+          </label>
+          <label>
+            Contracts
+            <input type="number" id="roll-contracts" value="1" min="1" max="100" />
+          </label>
+        </div>
+        <div class="field-row">
+          <label>
+            Limit Credit ($)
+            <input type="number" id="roll-limit-credit" step="0.01" min="0.01" placeholder="Start (high)" />
+          </label>
+          <label>
+            Floor Credit ($)
+            <input type="number" id="roll-min-credit" step="0.01" min="0.01" placeholder="Stop (low)" />
+          </label>
+          <label>
+            Step
+            <select id="roll-increment">
+              <option value="auto">Auto-detect</option>
+              <option value="0.02">$0.02 (penny)</option>
+              <option value="0.05">$0.05 (nickel)</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <span id="roll-info" class="text-muted">Pick a target strike to see its mid.</span>
+        </div>
+        <button id="btn-prepare-roll" class="btn primary">Prepare Roll</button>
+      </div>
+    </section>
+    </div>
   </div>
 
   <!-- PREFLIGHT MODAL -->
