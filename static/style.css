@@ -130,23 +130,12 @@ section h2 {
 
 .positions-grid {
   display: grid;
-  grid-template-columns: 1fr 0.5fr 0.5fr;
-  gap: 0;
+  /* Fixed, content-sized columns packed to the left so values sit close to
+     the symbol instead of spanning the whole panel. */
+  grid-template-columns: 11em 2.3em 4em;
+  column-gap: 12px;
+  justify-content: start;
   align-items: center;
-}
-
-.positions-grid > span {
-  padding: 0 3px;
-}
-
-.positions-grid > span:first-child {
-  padding-left: 0;
-  padding-right: 3px;
-}
-
-.positions-grid > span:last-child {
-  padding-right: 0;
-  padding-left: 3px;
 }
 
 .positions-header {
@@ -572,8 +561,6 @@ select {
   }
 
   .positions-grid {
-    grid-template-columns: 0.9fr 0.5fr 0.5fr;
-    gap: 0;
     font-size: 0.82rem;
   }
 
@@ -612,23 +599,7 @@ select {
   }
 
   .positions-grid {
-    grid-template-columns: 0.8fr 0.5fr 0.5fr;
-    gap: 0;
     font-size: 0.78rem;
-  }
-
-  .positions-grid > span {
-    padding: 0 4px;
-  }
-  
-  .positions-grid > span:first-child {
-    padding-left: 0;
-    padding-right: 4px;
-  }
-  
-  .positions-grid > span:last-child {
-    padding-right: 0;
-    padding-left: 4px;
   }
 
   .positions-header {
@@ -727,23 +698,7 @@ select {
   }
 
   .positions-grid {
-    grid-template-columns: 0.8fr 0.5fr 0.5fr;
-    gap: 0;
     font-size: 0.72rem;
-  }
-
-  .positions-grid > span {
-    padding: 0 3px;
-  }
-  
-  .positions-grid > span:first-child {
-    padding-left: 0;
-    padding-right: 3px;
-  }
-  
-  .positions-grid > span:last-child {
-    padding-right: 0;
-    padding-left: 3px;
   }
 
   .positions-header {
