@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Public Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css?v=2" />
+</head>
+<body>
+  <!-- HEADER -->
+  <header id="header">
+    <h1>Public Dashboard</h1>
+    <div id="account-bar">
+      <span class="metric"><strong>Equity:</strong> <span id="equity">—</span></span>
+      <span class="metric"><strong>BP:</strong> $<span id="bp">—</span></span>
+      <span class="metric"><strong>Options BP:</strong> $<span id="opt-bp">—</span></span>
+      <span id="connected-badge" class="badge pending">● connecting</span>
+    </div>
+  </header>
+
+  <div id="main-grid">
+    <!-- LEFT: Positions -->
+    <section id="positions-panel">
+      <h2>Positions</h2>
+      <div id="positions-header" class="positions-grid positions-header hidden">
+        <span>Symbol</span>
+        <span>Qty</span>
+        <span>P&amp;L</span>
+      </div>
+      <div id="positions-list" class="loading">Loading...</div>
+    </section>
+
+    <!-- RIGHT: Spread Builder -->
+    <section id="builder-panel">
+      <h2>Call Debit Spread Builder</h2>
+
+      <div class="field-row">
+        <label>
+          Symbol
+          <input type="text" id="sym-input" placeholder="e.g. NVDA" maxlength="6" autofocus />
+        </label>
+        <button id="btn-fetch-chain" class="btn primary">Fetch Chain</button>
+        <button id="btn-refresh-quote" class="btn">Refresh Quote</button>
+      </div>
+
+      <div id="quote-bar" class="hidden">
+        <span id="quote-symbol"></span>
+        Last: <strong id="quote-last">—</strong>
+        Bid: <span id="quote-bid">—</span>
+        Ask: <span id="quote-ask">—</span>
+      </div>
+
+      <div class="field-row">
+        <label>
+          Expiration
+          <select id="exp-select" disabled>
+            <option value="">— Select —</option>
+          </select>
+        </label>
+        <button id="btn-load-chain" class="btn primary" disabled>Load Strikes</button>
+      </div>
+
+      <div id="chain-container" class="hidden">
+        <h3>Call Strikes</h3>
+        <div id="calls-table-wrapper">
+          <table id="calls-table">
+            <thead>
+              <tr>
+                <th class="col-select"></th>
+                <th class="col-strike">Strike</th>
+                <th class="col-bid">Bid</th>
+                <th class="col-mid">Mid</th>
+                <th class="col-ask">Ask</th>
+                <th class="col-vol">Vol</th>
+                <th class="col-oi">OI</th>
+                <th class="col-delta">Δ</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="spread-config" class="hidden">
+        <h3>Spread Config</h3>
+        <div class="field-row">
+          <label>
+            Buy Strike
+            <input type="number" id="buy-strike" step="0.5" placeholder="Long" />
+          </label>
+          <label>
+            Sell Strike
+            <input type="number" id="sell-strike" step="0.5" placeholder="Short" />
+          </label>
+          <label>
+            Contracts
+            <input type="number" id="contracts" value="1" min="1" max="100" />
+          </label>
+          <label>
+            Limit Debit ($)
+            <input type="number" id="limit-debit" step="0.01" min="0.01" placeholder="Starting debit" />
+          </label>
+          <label>
+            Max Cap ($)
+            <input type="number" id="max-cap" step="0.01" min="0.01" placeholder="Auto: width − $0.01" />
+          </label>
+        </div>
+        <div class="field-row">
+          <span id="spread-width-label">Width: —</span>
+          <span id="max-debit-label">Max Debit: —</span>
+        </div>
+        <button id="btn-prepare" class="btn primary">Prepare Spread</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- PREFLIGHT MODAL -->
+  <div id="preflight-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Preflight Review</h2>
+      <pre id="preflight-summary"></pre>
+      <div id="preflight-warnings" class="warnings hidden"></div>
+      <div class="modal-actions">
+        <button id="btn-cancel-modal" class="btn">Cancel</button>
+        <button id="btn-confirm" class="btn danger">Confirm & Place</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHASER MODAL -->
+  <div id="chaser-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Executing Order</h2>
+      <div id="chaser-progress">
+        <div class="progress-bar"><div id="chaser-fill" class="progress-fill" style="width:0%"></div></div>
+        <p>Cycle: <strong id="chaser-cycle">—</strong> / <span id="chaser-max">20</span></p>
+        <p>Current limit: $<strong id="chaser-limit">—</strong></p>
+        <p>Status: <strong id="chaser-status">Running...</strong></p>
+        <p id="chaser-error" class="error hidden"></p>
+      </div>
+      <div id="chaser-done" class="hidden">
+        <p class="success">✅ Order filled!</p>
+        <p>Final limit: $<strong id="chaser-final-limit">—</strong></p>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-close-chaser" class="btn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
