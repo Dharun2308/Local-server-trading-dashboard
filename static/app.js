@@ -64,6 +64,7 @@ const dom = {
   chaserMax: $('#chaser-max'),
   chaserLimit: $('#chaser-limit'),
   chaserStatus: $('#chaser-status'),
+  chaserNote: $('#chaser-note'),
   chaserError: $('#chaser-error'),
   chaserDone: $('#chaser-done'),
   chaserFinalLimit: $('#chaser-final-limit'),
@@ -476,6 +477,7 @@ async function confirmSpread() {
     dom.chaserCycle.textContent = '0';
     dom.chaserLimit.textContent = '—';
     dom.chaserStatus.textContent = 'Running...';
+    dom.chaserNote.textContent = '';
     dom.chaserFill.style.width = '0%';
 
     // Start polling
@@ -507,6 +509,7 @@ async function pollChaser(taskId) {
     dom.chaserMax.textContent = maxCycles;
     dom.chaserLimit.textContent = fmt(status.current_limit);
     dom.chaserFill.style.width = `${Math.min((status.cycle || 0) / maxCycles, 1) * 100}%`;
+    dom.chaserNote.textContent = status.last_warning || '';
 
     if (status.status === 'FILLED') {
       stopChaser();

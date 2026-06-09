@@ -947,15 +947,24 @@ def _run_roll_chaser_thread(task_id: str, token: str):
             ],
         )
 
-        poll_interval = 5
+        poll_interval = 3                 # how often to check a resting order
+        level_rest_secs = 12              # let each credit level rest before conceding
+        floor_rest_secs = 90              # let the floor level rest before giving up
         max_consecutive_errors = 5
         consecutive_errors = 0
 
-        # One cycle per credit level from start down to floor (inclusive), capped.
+        # One price level per step from start down to the floor (inclusive).
         steps = int((start_credit - floor_credit) / step) if step > 0 else 0
         max_cycles = min(steps + 1, 60)
         with _chaser_lock:
             _chaser_tasks[task_id]["max_cycles"] = max_cycles
+
+        def _reject_reason(detail):
+            for attr in ("reject_reason", "rejection_reason", "failure_reason", "reason", "message", "messages"):
+                v = getattr(detail, attr, None)
+                if v:
+                    return str(v)
+            return ""
 
         current_credit = start_credit
 
@@ -967,29 +976,22 @@ def _run_roll_chaser_thread(task_id: str, token: str):
                     _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
                     return
 
-            # Never offer below the floor.
             if current_credit < floor_credit:
                 current_credit = floor_credit
+            at_floor = current_credit <= floor_credit
+            rest_budget = floor_rest_secs if at_floor else level_rest_secs
 
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_credit))
 
+            # Place ONE order at this credit level.
             try:
                 req.limit_price = -current_credit
                 order = t.client.place_multileg_order(req, account_id=t.account_id)
                 placed_order_id = order.order_id
                 with _chaser_lock:
                     _chaser_tasks[task_id]["order_id"] = placed_order_id
-
-                time.sleep(poll_interval + random.uniform(0, 1))
-
-                detail = t.client.get_order(placed_order_id, account_id=t.account_id)
-                status = (
-                    detail.status.value
-                    if hasattr(detail.status, "value")
-                    else str(detail.status)
-                )
             except Exception as cycle_err:
                 err_info = _categorize_chaser_error(str(cycle_err))
                 with _chaser_lock:
@@ -1011,56 +1013,90 @@ def _run_roll_chaser_thread(task_id: str, token: str):
                     return
                 time.sleep(poll_interval)
                 continue
-
             consecutive_errors = 0
 
-            # Cancel that arrived during the poll window.
-            with _chaser_lock:
-                cancel_now = _chaser_tasks[task_id].get("cancel_requested")
-            if cancel_now and status != "FILLED":
-                try:
-                    t.client.cancel_order(placed_order_id, account_id=t.account_id)
-                except Exception:
-                    pass
-                with _chaser_lock:
-                    _chaser_tasks[task_id]["status"] = "CANCELLED"
-                    _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
-                return
+            # Let the order REST and poll it (holding queue priority) until it
+            # fills, is rejected, the rest budget elapses, or a cancel arrives.
+            waited = 0
+            outcome = "open"
+            reason = ""
+            while waited < rest_budget:
+                time.sleep(poll_interval + random.uniform(0, 1))
+                waited += poll_interval
 
-            if status == "FILLED":
+                with _chaser_lock:
+                    cancel_now = _chaser_tasks[task_id].get("cancel_requested")
+                if cancel_now:
+                    try:
+                        t.client.cancel_order(placed_order_id, account_id=t.account_id)
+                    except Exception:
+                        pass
+                    with _chaser_lock:
+                        _chaser_tasks[task_id]["status"] = "CANCELLED"
+                        _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
+                    return
+
+                try:
+                    detail = t.client.get_order(placed_order_id, account_id=t.account_id)
+                    status = (
+                        detail.status.value
+                        if hasattr(detail.status, "value")
+                        else str(detail.status)
+                    )
+                except Exception as poll_err:
+                    # A transient status-check failure shouldn't abort the rest.
+                    with _chaser_lock:
+                        _chaser_tasks[task_id]["last_warning"] = f"status check failed: {poll_err}"
+                    continue
+
+                phase = "resting at floor" if at_floor else f"level {cycle}/{max_cycles}"
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["last_warning"] = (
+                        f"{phase}: credit ${current_credit} — {status} ({waited}s)"
+                    )
+
+                if status == "FILLED":
+                    outcome = "filled"
+                    break
+                if status in ("CANCELLED", "REJECTED"):
+                    outcome = status.lower()
+                    if status == "REJECTED":
+                        reason = _reject_reason(detail)
+                    break
+                # still working — keep resting to preserve queue priority
+
+            if outcome == "filled":
                 with _chaser_lock:
                     _chaser_tasks[task_id]["status"] = "FILLED"
                     _chaser_tasks[task_id]["filled_at"] = datetime.now().isoformat()
                     _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
                 return
 
-            if status in ("CANCELLED", "REJECTED"):
-                if status != "CANCELLED":
-                    try:
-                        t.client.cancel_order(placed_order_id, account_id=t.account_id)
-                    except Exception:
-                        pass
-                if current_credit <= floor_credit:
-                    continue  # already resting at the floor; let cycles exhaust
-                current_credit -= step
-                continue
+            # Not filled at this level — make sure the order is gone before re-pricing.
+            if outcome in ("open", "rejected"):
+                try:
+                    t.client.cancel_order(placed_order_id, account_id=t.account_id)
+                except Exception:
+                    pass
+            if outcome == "rejected" and reason:
+                with _chaser_lock:
+                    _chaser_tasks[task_id]["last_warning"] = (
+                        f"Rejected at credit ${current_credit}: {reason}"
+                    )
 
-            # Still open — cancel and step the credit down.
-            try:
-                t.client.cancel_order(placed_order_id, account_id=t.account_id)
-            except Exception:
-                pass
-            if current_credit <= floor_credit:
-                continue
+            if at_floor:
+                break  # rested at the floor without filling → expire below
             current_credit -= step
 
-        # Walked down to the floor without filling.
+        # Walked down to the floor and rested without filling.
         with _chaser_lock:
             _chaser_tasks[task_id]["status"] = "EXPIRED"
             _chaser_tasks[task_id]["final_limit"] = float(str(current_credit))
-            _chaser_tasks[task_id]["error"] = (
-                f"Not filled down to floor credit ${floor_credit}."
-            )
+            last = _chaser_tasks[task_id].get("last_warning")
+            msg = f"Not filled down to floor credit ${floor_credit}."
+            if last:
+                msg += f" Last: {last}"
+            _chaser_tasks[task_id]["error"] = msg
 
     except Exception as e:
         with _chaser_lock:
