@@ -466,6 +466,20 @@ select {
 .iv-stance.iv-sell { color: var(--success); background: rgba(63, 185, 80, 0.12); }
 .iv-stance.iv-buy { color: var(--accent); background: rgba(88, 166, 255, 0.12); }
 .iv-stance.iv-neutral { color: var(--text-muted); }
+.iv-stance.iv-warn { color: var(--danger); background: rgba(248, 81, 73, 0.12); }
+
+/* ── Covered call writer ─────────────────────────────────────────────── */
+#cc-iv-chip {
+  padding-bottom: 8px; /* baseline-align the chip with the dropdown beside it */
+}
+
+#cc-panel select {
+  max-width: 220px;
+}
+
+#cc-info {
+  font-size: 0.8rem;
+}
 
 .iv-rank-row {
   display: flex;

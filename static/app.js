@@ -16,6 +16,9 @@ let state = {
   currentUnderlyingPrice: null,
   rollChain: null,       // target call chain for the roller, by strike
   lastPositions: [],     // latest /api/account positions (for IV scan + context)
+  stockPositions: [],    // latest equity positions (for the CC writer)
+  ccChain: null,         // call chain for the CC writer, by strike
+  ccSpot: null,          // last price of the selected CC stock
 };
 
 // ── DOM refs ───────────────────────────────────────────────────────────
@@ -88,6 +91,18 @@ const dom = {
   btnIvCheck: $('#btn-iv-check'),
   btnIvScan: $('#btn-iv-scan'),
   ivResults: $('#iv-results'),
+  // covered call writer
+  ccStock: $('#cc-stock'),
+  ccIvChip: $('#cc-iv-chip'),
+  ccConfig: $('#cc-config'),
+  ccExp: $('#cc-exp'),
+  ccStrike: $('#cc-strike'),
+  ccContracts: $('#cc-contracts'),
+  ccLimitCredit: $('#cc-limit-credit'),
+  ccMinCredit: $('#cc-min-credit'),
+  ccIncrement: $('#cc-increment'),
+  ccInfo: $('#cc-info'),
+  btnPrepareCc: $('#btn-prepare-cc'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -167,6 +182,10 @@ async function loadAccount() {
     // Keep the roller's short-call dropdown and IV scan in sync.
     state.lastPositions = pos;
     populateRollPositions(pos);
+
+    // Keep the covered-call writer's stock dropdown in sync.
+    state.stockPositions = data.stock_positions || [];
+    populateCcStocks(state.stockPositions);
   } catch (e) {
     console.error('Account load failed:', e);
     dom.badge.textContent = '● error';
@@ -451,16 +470,15 @@ function showPreflight(data, kind) {
 async function confirmSpread() {
   if (!state.preparedToken) return;
 
-  const isRoll = state.preparedKind === 'roll';
+  const kind = state.preparedKind || 'spread';
   dom.btnConfirm.disabled = true;
   dom.btnConfirm.textContent = 'Placing...';
 
   try {
     const body = { token: state.preparedToken };
-    let endpoint = '/spread/confirm';
-    if (isRoll) {
-      endpoint = '/roll/confirm';
-    } else {
+    const endpoints = { spread: '/spread/confirm', roll: '/roll/confirm', cc: '/cc/confirm' };
+    const endpoint = endpoints[kind] || endpoints.spread;
+    if (kind === 'spread') {
       const capVal = dom.maxCapInput.value;
       if (capVal) body.max_cap = parseFloat(capVal);
     }
@@ -480,7 +498,7 @@ async function confirmSpread() {
     dom.btnCancelChaser.disabled = false;
     dom.btnCancelChaser.textContent = 'Cancel Order';
 
-    dom.chaserMax.textContent = isRoll ? '—' : '20';
+    dom.chaserMax.textContent = kind === 'spread' ? '20' : '—';
     dom.chaserCycle.textContent = '0';
     dom.chaserLimit.textContent = '—';
     dom.chaserStatus.textContent = 'Running...';
@@ -689,6 +707,193 @@ async function prepareRoll() {
   }
 }
 
+// ── Covered call writer ──────────────────────────────────────────────────
+// Only stocks with at least 100 shares can cover a call.
+function populateCcStocks(stocks) {
+  const eligible = (stocks || []).filter((s) => Number(s.quantity) >= 100);
+  const prev = dom.ccStock.value;
+
+  if (eligible.length === 0) {
+    dom.ccStock.innerHTML = '<option value="">— No 100+ share positions —</option>';
+    dom.ccStock.disabled = true;
+    return;
+  }
+
+  dom.ccStock.innerHTML =
+    '<option value="">— Select stock —</option>' +
+    eligible
+      .map((s) => {
+        const maxContracts = Math.floor(Number(s.quantity) / 100);
+        return `<option value="${s.symbol}" data-shares="${s.quantity}" data-max="${maxContracts}">` +
+               `${s.symbol} (${s.quantity} sh → ${maxContracts} contract${maxContracts > 1 ? 's' : ''})</option>`;
+      })
+      .join('');
+  dom.ccStock.disabled = false;
+
+  if (prev && eligible.some((s) => s.symbol === prev)) {
+    dom.ccStock.value = prev;
+  }
+}
+
+function renderCcIvChip(content, cls = '') {
+  dom.ccIvChip.innerHTML = content
+    ? `<span class="iv-stance ${cls}">${content}</span>`
+    : '';
+}
+
+async function onCcStockChange() {
+  const opt = dom.ccStock.selectedOptions[0];
+  state.ccChain = null;
+  state.ccSpot = null;
+  dom.ccStrike.innerHTML = '<option value="">— Load expiration —</option>';
+  dom.ccStrike.disabled = true;
+  dom.ccInfo.textContent = 'Pick a strike to see its premium.';
+  renderCcIvChip('');
+
+  if (!opt || !opt.value) {
+    hide(dom.ccConfig);
+    return;
+  }
+  const symbol = opt.value;
+  const maxContracts = Number(opt.dataset.max) || 1;
+  show(dom.ccConfig);
+  dom.ccContracts.value = maxContracts;
+  dom.ccContracts.max = maxContracts;
+
+  // Kick off IV check immediately — this is the sell/don't-sell signal.
+  renderCcIvChip('IV…', 'iv-neutral');
+  apiFetch(`/ivrank?symbol=${symbol}`)
+    .then((iv) => {
+      const rec = iv.recommendation || {};
+      if (iv.iv_rank != null) {
+        const cls = iv.iv_rank >= 70 ? 'iv-sell' : iv.iv_rank < 30 ? 'iv-warn' : 'iv-neutral';
+        renderCcIvChip(`IV rank ${fmt(iv.iv_rank, 0)} — ${rec.label || ''}`, cls);
+        if (iv.iv_rank < 30) {
+          toast(`${symbol} IV rank ${fmt(iv.iv_rank, 0)} — premium is cheap; weak time to sell covered calls.`, 'error', 6000);
+        }
+      } else if (iv.iv_pct != null) {
+        const cls = iv.iv_pct >= 60 ? 'iv-sell' : iv.iv_pct < 30 ? 'iv-warn' : 'iv-neutral';
+        renderCcIvChip(`ATM IV ${fmt(iv.iv_pct, 0)}% (rank ${iv.history_days}/${iv.min_days_for_rank}d)`, cls);
+      } else {
+        renderCcIvChip('IV unavailable', 'iv-neutral');
+      }
+    })
+    .catch(() => renderCcIvChip('IV check failed', 'iv-neutral'));
+
+  // Spot price (used to preselect the first OTM strike).
+  apiFetch(`/quote?symbol=${symbol}`)
+    .then((q) => { state.ccSpot = q.last; })
+    .catch(() => {});
+
+  dom.ccExp.disabled = true;
+  dom.ccExp.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const data = await apiFetch(`/expirations?symbol=${symbol}`);
+    dom.ccExp.innerHTML =
+      '<option value="">— Select —</option>' +
+      data.expirations.map((e) => `<option value="${e}">${e}</option>`).join('');
+    dom.ccExp.disabled = false;
+  } catch (e) {
+    dom.ccExp.innerHTML = '<option value="">— Select —</option>';
+    toast(`Couldn't load expirations: ${e.message}`, 'error');
+  }
+}
+
+async function onCcExpChange() {
+  const symbol = dom.ccStock.value;
+  const exp = dom.ccExp.value;
+  state.ccChain = null;
+  dom.ccStrike.innerHTML = '<option value="">— Select —</option>';
+  dom.ccStrike.disabled = true;
+  if (!symbol || !exp) return;
+
+  dom.ccStrike.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const data = await apiFetch(`/chain?symbol=${symbol}&expiration=${exp}`);
+    const calls = data.calls || [];
+    state.ccChain = {};
+    calls.forEach((c) => { state.ccChain[c.strike] = c; });
+    dom.ccStrike.innerHTML =
+      '<option value="">— Select strike —</option>' +
+      calls
+        .map((c) => `<option value="${c.strike}">$${fmt(c.strike, 1)} (mid ${fmt(c.mid)})</option>`)
+        .join('');
+    dom.ccStrike.disabled = false;
+
+    // Preselect the first OTM strike (covered calls are usually sold above spot).
+    if (state.ccSpot != null) {
+      const otm = calls.find((c) => c.strike > state.ccSpot);
+      if (otm) {
+        dom.ccStrike.value = otm.strike;
+        onCcStrikeChange();
+      }
+    }
+  } catch (e) {
+    dom.ccStrike.innerHTML = '<option value="">— Select —</option>';
+    toast(`Couldn't load strikes: ${e.message}`, 'error');
+  }
+}
+
+function onCcStrikeChange() {
+  const strike = parseFloat(dom.ccStrike.value);
+  if (isNaN(strike) || !state.ccChain) {
+    dom.ccInfo.textContent = 'Pick a strike to see its premium.';
+    return;
+  }
+  const leg = state.ccChain[strike];
+  if (!leg) return;
+  const otmLabel = state.ccSpot != null
+    ? (strike > state.ccSpot ? 'OTM' : 'ITM — caps upside below spot')
+    : '';
+  dom.ccInfo.textContent =
+    `$${fmt(strike, 1)}C — bid $${fmt(leg.bid)} / mid $${fmt(leg.mid)} / ask $${fmt(leg.ask)}` +
+    (otmLabel ? ` (${otmLabel})` : '');
+  // Suggest a chase range: start near ask, floor near bid (placeholders only —
+  // never overwrite what the user typed).
+  dom.ccLimitCredit.placeholder = fmt(leg.ask || leg.mid, 2);
+  dom.ccMinCredit.placeholder = fmt(leg.bid || 0, 2);
+}
+
+async function prepareCc() {
+  const symbol = dom.ccStock.value;
+  const expiration = dom.ccExp.value;
+  const strike = parseFloat(dom.ccStrike.value);
+  const contracts = parseInt(dom.ccContracts.value) || 1;
+  const limitCredit = parseFloat(dom.ccLimitCredit.value);
+  const minCredit = parseFloat(dom.ccMinCredit.value);
+  const increment = dom.ccIncrement.value;
+
+  if (!symbol) { toast('Select a stock you hold.', 'error'); return; }
+  if (!expiration || isNaN(strike)) { toast('Select an expiration and strike.', 'error'); return; }
+  if (isNaN(limitCredit) || isNaN(minCredit)) { toast('Enter both limit and floor credit.', 'error'); return; }
+  if (limitCredit <= 0 || minCredit <= 0) { toast('Credits must be positive.', 'error'); return; }
+  if (minCredit > limitCredit) { toast('Floor credit cannot exceed the limit credit.', 'error'); return; }
+
+  dom.btnPrepareCc.disabled = true;
+  dom.btnPrepareCc.textContent = 'Preparing...';
+  try {
+    const data = await apiFetch('/cc/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol,
+        expiration,
+        strike,
+        contracts,
+        limit_credit: limitCredit,
+        min_credit: minCredit,
+        increment,
+      }),
+    });
+    showPreflight(data, 'cc');
+  } catch (e) {
+    toast(`Prepare covered call failed: ${e.message}`, 'error');
+  } finally {
+    dom.btnPrepareCc.disabled = false;
+    dom.btnPrepareCc.textContent = 'Prepare Covered Call';
+  }
+}
+
 // ── IV rank ──────────────────────────────────────────────────────────────
 const STANCE_META = {
   SELL_PREMIUM: { cls: 'iv-sell', icon: '▲' },
@@ -850,6 +1055,12 @@ dom.ivSymbol.addEventListener('keydown', (e) => {
     checkIv(dom.ivSymbol.value);
   }
 });
+
+// Covered call writer wiring
+dom.ccStock.addEventListener('change', onCcStockChange);
+dom.ccExp.addEventListener('change', onCcExpChange);
+dom.ccStrike.addEventListener('change', onCcStrikeChange);
+dom.btnPrepareCc.addEventListener('click', prepareCc);
 
 // Roller wiring
 dom.rollPosition.addEventListener('change', onRollPositionChange);

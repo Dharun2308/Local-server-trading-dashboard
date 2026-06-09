@@ -231,9 +231,10 @@ class PublicTrader:
         Returns PendingOrder — user MUST review .summary before calling confirm(token).
         """
         shares = self.shares_held(symbol)
-        if shares < contracts:
+        if shares < contracts * 100:
             raise ValueError(
-                f"Insufficient shares: holding {shares}, need {contracts} for covered call."
+                f"Insufficient shares: holding {shares}, need {contracts * 100} "
+                f"({contracts} contract{'s' if contracts != 1 else ''} × 100) for a covered call."
             )
 
         opt = self._resolve_osi(symbol, expiration, strike, "CALL", "SELL")

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Public Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=8" />
+  <link rel="stylesheet" href="/static/style.css?v=9" />
 </head>
 <body>
   <!-- HEADER -->
@@ -124,6 +124,64 @@
           <span id="max-debit-label">Max Debit: —</span>
         </div>
         <button id="btn-prepare" class="btn primary">Prepare Spread</button>
+      </div>
+    </section>
+
+    <!-- Covered Call Writer -->
+    <section id="cc-panel">
+      <h2>Sell Covered Call</h2>
+
+      <div class="field-row">
+        <label>
+          Stock (shares held)
+          <select id="cc-stock" disabled>
+            <option value="">— No stock positions —</option>
+          </select>
+        </label>
+        <span id="cc-iv-chip"></span>
+      </div>
+
+      <div id="cc-config" class="hidden">
+        <div class="field-row">
+          <label>
+            Expiration
+            <select id="cc-exp" disabled>
+              <option value="">— Select —</option>
+            </select>
+          </label>
+          <label>
+            Strike
+            <select id="cc-strike" disabled>
+              <option value="">— Load expiration —</option>
+            </select>
+          </label>
+          <label>
+            Contracts
+            <input type="number" id="cc-contracts" value="1" min="1" max="100" />
+          </label>
+        </div>
+        <div class="field-row">
+          <label>
+            Limit Credit ($)
+            <input type="number" id="cc-limit-credit" step="0.01" min="0.01" placeholder="Start (high)" />
+          </label>
+          <label>
+            Floor Credit ($)
+            <input type="number" id="cc-min-credit" step="0.01" min="0.01" placeholder="Stop (low)" />
+          </label>
+          <label>
+            Step
+            <select id="cc-increment">
+              <option value="auto">Auto-detect</option>
+              <option value="0.02">$0.02 (penny)</option>
+              <option value="0.05">$0.05 (nickel)</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <span id="cc-info" class="text-muted">Pick a strike to see its premium.</span>
+        </div>
+        <button id="btn-prepare-cc" class="btn primary">Prepare Covered Call</button>
       </div>
     </section>
 
