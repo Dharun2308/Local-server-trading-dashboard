@@ -73,6 +73,7 @@ class PublicTrader:
         self._aid = None
         self._pending: dict = {}  # token → PendingOrder
         self._div_cache: dict = {}  # symbol → (ex_div_date_str, fetched_at)
+        self._earn_cache: dict = {}  # symbol → ([earnings_dates], fetched_at)
 
     # ── Account ──────────────────────────────────────────────────────────
 
@@ -312,6 +313,14 @@ class PublicTrader:
             warnings.append(
                 f"WARNING: Ex-dividend {ex_div_warning} — ITM call has early assignment risk "
                 f"on the short leg (call holder may exercise to capture dividend)."
+            )
+
+        # Safety: earnings risk (IV crush + unpredictable gap moves)
+        earn_date = self._is_near_earnings(symbol, expiration)
+        if earn_date:
+            warnings.append(
+                f"WARNING: Earnings {earn_date} — option expires within ±7 days of "
+                f"earnings. IV crush and gap risk on the short leg."
             )
 
         # Safety: strike width / arbitrage protection
@@ -802,6 +811,58 @@ class PublicTrader:
         days_to_exp = (exp_date - today).days
         if days_to_exp <= 7:
             return "unknown (≤7 DTE)"
+        return None
+
+    def _get_earnings_dates(self, symbol: str) -> Optional[list]:
+        """Get upcoming earnings dates for a symbol.
+
+        Returns list of datetime.date objects, or None if no earnings data
+        (ETFs like SPY don't have earnings). Cached with 10-min TTL.
+        """
+        now = time.time()
+        cached = self._earn_cache.get(symbol)
+        if cached and (now - cached[1]) < 600:
+            return cached[0]
+
+        try:
+            t = yf.Ticker(symbol)
+            ed = t.earnings_dates
+            if ed is None or len(ed) == 0:
+                self._earn_cache[symbol] = (None, now)
+                return None
+
+            today = datetime.date.today()
+            dates = []
+            for idx in ed.index:
+                d = idx.date() if hasattr(idx, 'date') else idx
+                if d > today:
+                    dates.append(d)
+
+            self._earn_cache[symbol] = (dates, now)
+            return dates
+
+        except Exception:
+            self._earn_cache[symbol] = (None, now)
+            return None
+
+    def _is_near_earnings(self, symbol: str, expiration: str) -> Optional[str]:
+        """Check if the option expiration is within ±7 calendar days of an earnings date.
+
+        Earnings announcements cause IV crush — selling options across earnings
+        is risky. Returns the nearest earnings date string (ISO format) if within
+        the window, or None if safe.
+        """
+        earnings = self._get_earnings_dates(symbol)
+        if earnings is None:
+            return None  # No earnings data (ETF or error)
+
+        exp_date = datetime.datetime.strptime(expiration, "%Y-%m-%d").date()
+
+        for earn_date in earnings:
+            delta = abs((exp_date - earn_date).days)
+            if delta <= 7:
+                return earn_date.isoformat()
+
         return None
 
     # ── Lifecycle ────────────────────────────────────────────────────────
