@@ -1821,6 +1821,7 @@ def _run_cc_chaser_thread(task_id: str, token: str):
             OrderSide,
             TimeInForce,
             OrderExpirationRequest,
+            OpenCloseIndicator,
         )
 
         contracts = int(info["contracts"])
@@ -1879,6 +1880,10 @@ def _run_cc_chaser_thread(task_id: str, token: str):
                     order_id=str(uuid.uuid4()),
                     instrument=instrument,
                     order_side=OrderSide.SELL,
+                    # Without an explicit OPEN indicator the API treats an option
+                    # SELL as sell-to-close and rejects it ("exceeds the amount
+                    # you have available to close") when no long call is held.
+                    open_close_indicator=OpenCloseIndicator.OPEN,
                     order_type=OrderType.LIMIT,
                     expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
                     quantity=Decimal(str(contracts)),

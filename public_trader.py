@@ -31,6 +31,7 @@ from public_api_sdk import (
     OrderRequest,
     OrderInstrument,
     OrderExpirationRequest,
+    OpenCloseIndicator,
 )
 
 
@@ -477,6 +478,9 @@ class PublicTrader:
             order_id=str(uuid.uuid4()),
             instrument=opt["instrument"],
             order_side=OrderSide.SELL,
+            # Sell-to-OPEN: without this the API treats an option SELL as a
+            # close and rejects it when no long call is held.
+            open_close_indicator=OpenCloseIndicator.OPEN,
             order_type=OrderType.LIMIT if limit else OrderType.MARKET,
             expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
             quantity=Decimal(str(contracts)),
