@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Public Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=9" />
+  <link rel="stylesheet" href="/static/style.css?v=10" />
 </head>
 <body>
   <!-- HEADER -->
@@ -23,7 +23,12 @@
     <!-- LEFT: Positions + IV Rank -->
     <div id="left-column">
     <section id="positions-panel">
-      <h2>Positions</h2>
+      <h2>Positions <button class="info-btn" type="button" aria-label="info">ⓘ</button></h2>
+      <div class="panel-help hidden">
+        Your open option positions and live P&amp;L. Negative qty = short (you sold it
+        and collected premium); positive = long (you paid). Watch shorts that drift
+        in-the-money — that's assignment risk.
+      </div>
       <div id="positions-header" class="positions-grid positions-header hidden">
         <span>Symbol</span>
         <span>Qty</span>
@@ -33,7 +38,14 @@
     </section>
 
     <section id="iv-panel">
-      <h2>IV Rank</h2>
+      <h2>IV Rank <button class="info-btn" type="button" aria-label="info">ⓘ</button></h2>
+      <div class="panel-help hidden">
+        Where today's implied volatility sits within this stock's own range, 0–100.
+        <strong>≥70</strong>: options are rich → sell premium (covered calls, rolls).
+        <strong>&lt;30</strong>: cheap → buy premium or wait. Needs ~20 days of history
+        to rank; until then it shows absolute IV. "Scan Positions" grades every ticker
+        you hold and feeds the history.
+      </div>
       <div class="field-row">
         <input type="text" id="iv-symbol" placeholder="e.g. RIVN" maxlength="6" />
         <button id="btn-iv-check" class="btn primary">Check</button>
@@ -46,7 +58,13 @@
     <!-- RIGHT: stacked panels -->
     <div id="right-column">
     <section id="builder-panel">
-      <h2>Call Debit Spread Builder</h2>
+      <h2>Call Debit Spread Builder <button class="info-btn" type="button" aria-label="info">ⓘ</button></h2>
+      <div class="panel-help hidden">
+        Buy a lower-strike call, sell a higher one — a bullish, defined-risk bet.
+        Max loss = the debit you pay; max profit = strike width − debit. The chaser
+        walks your limit debit <em>up</em> until it fills. Best when IV is low (you're
+        buying premium). Watch the ex-div / earnings warnings on the confirm screen.
+      </div>
 
       <div class="field-row">
         <label>
@@ -129,7 +147,13 @@
 
     <!-- Covered Call Writer -->
     <section id="cc-panel">
-      <h2>Sell Covered Call</h2>
+      <h2>Sell Covered Call <button class="info-btn" type="button" aria-label="info">ⓘ</button></h2>
+      <div class="panel-help hidden">
+        Sell a call against 100+ shares you own to collect premium. Pick an OTM strike
+        (above spot) to keep upside room; ITM caps your gains. Best when IV rank is high —
+        the chip warns (never blocks) if premium is cheap. The chaser walks your credit
+        <em>down</em> from limit to floor until it fills.
+      </div>
 
       <div class="field-row">
         <label>
@@ -187,7 +211,13 @@
 
     <!-- Covered Call Roller -->
     <section id="roller-panel">
-      <h2>Covered Call Roller</h2>
+      <h2>Covered Call Roller <button class="info-btn" type="button" aria-label="info">ⓘ</button></h2>
+      <div class="panel-help hidden">
+        Move an existing short call to a new strike/expiration for a net credit — use it
+        to dodge assignment or buy more time. The chaser walks the credit <em>down</em> to
+        your floor. If a roll won't pay a credit, you may be rolling too far; widen the
+        expiration or move the strike closer.
+      </div>
 
       <div class="field-row">
         <label>
@@ -241,6 +271,40 @@
         </div>
         <button id="btn-prepare-roll" class="btn primary">Prepare Roll</button>
       </div>
+    </section>
+
+    <!-- Premium Yield -->
+    <section id="yield-panel">
+      <h2>Premium Yield
+        <button class="info-btn" type="button" aria-label="info">ⓘ</button>
+        <button id="btn-yield-refresh" class="btn btn-sm">Refresh</button>
+      </h2>
+      <div class="panel-help hidden">
+        For each short option: the annualized return on the strike from the
+        <strong>remaining</strong> time value (intrinsic value isn't income — it's
+        assignment exposure). <strong>High %</strong> = still paying you, let it ride.
+        <strong>Low %</strong> = premium nearly gone, roll or close to redeploy the capital.
+        <strong>ITM</strong> = assignment risk. Annualized so a 7-day and a 45-day position
+        compare fairly.
+      </div>
+      <div id="yield-results"><p class="text-muted">Loading…</p></div>
+    </section>
+
+    <!-- Chaser Fill Analytics -->
+    <section id="fills-panel">
+      <h2>Chaser Fill Analytics
+        <button class="info-btn" type="button" aria-label="info">ⓘ</button>
+        <button id="btn-fills-refresh" class="btn btn-sm">Refresh</button>
+      </h2>
+      <div class="panel-help hidden">
+        Every chaser run (spread, roll, covered call) logged. <strong>Fill rate</strong>:
+        how often you actually fill. <strong>Avg cycles</strong>: steps to fill.
+        <strong>Avg concession</strong>: how far price drifted from your start in the
+        unfavorable direction. Tuning: if you always fill near the floor, start lower
+        (skip the wasted cycles); if you rarely fill, widen the range or set a friendlier start.
+      </div>
+      <div id="fills-summary"></div>
+      <div id="fills-results"><p class="text-muted">Loading…</p></div>
     </section>
     </div>
   </div>

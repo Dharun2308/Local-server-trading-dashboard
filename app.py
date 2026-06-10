@@ -492,7 +492,233 @@ def api_ivrank():
         return jsonify({"error": f"IV lookup failed: {e}"}), 500
 
 
-# ── Spread endpoints ───────────────────────────────────────────────────
+# ── Chaser fill analytics ──────────────────────────────────────────────
+# Every credit/debit chaser (spread, roll, covered call) records its outcome
+# here when its background thread exits. The point is feedback: over many
+# orders you can see your fill rate, how many cycles it typically takes, and
+# how far the chaser had to concede from your starting price. That tells you
+# whether your start/floor credits and step size are well chosen.
+#
+# Stored as a flat JSON list on the server (gitignored, like iv_history.json),
+# capped to the most recent N records. One record per completed chaser run.
+_FILLS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fills.json")
+_fills_lock = threading.Lock()
+FILLS_MAX_RECORDS = 300
+
+
+def _append_fill(record: dict) -> None:
+    """Append one chaser-outcome record to the fill log (atomic, capped).
+
+    Never raises — analytics must not be able to break a live order thread.
+    """
+    try:
+        with _fills_lock:
+            try:
+                with open(_FILLS_PATH) as f:
+                    records = json.load(f)
+                    if not isinstance(records, list):
+                        records = []
+            except (FileNotFoundError, json.JSONDecodeError):
+                records = []
+            records.append(record)
+            if len(records) > FILLS_MAX_RECORDS:
+                records = records[-FILLS_MAX_RECORDS:]
+            tmp = _FILLS_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(records, f)
+            os.replace(tmp, _FILLS_PATH)
+    except Exception:
+        pass
+
+
+def _log_chaser_result(task_id: str, kind: str, symbol: str, start: float,
+                       bound: float, step: float, direction: str) -> None:
+    """Build and store a fill record from a finished chaser task.
+
+    Called from each chaser thread's `finally`, so it runs exactly once per
+    run regardless of how the thread exited (fill / expire / cancel / error).
+
+    Args:
+        kind:      'spread' | 'roll' | 'cc'
+        direction: 'credit' (roll/cc walk price DOWN) or 'debit' (spread walks UP)
+        start:     the user's starting limit (credit or debit)
+        bound:     the floor credit (credit) or price ceiling (debit)
+        step:      increment per cycle
+    """
+    task = _chaser_tasks.get(task_id, {})
+    status = task.get("status", "UNKNOWN")
+    final = task.get("final_limit")
+    cycles = task.get("cycle", 0)
+
+    # Concession = how far the fill drifted from your starting price, in the
+    # unfavorable direction (credit: start − final; debit: final − start).
+    concession = None
+    if final is not None and start is not None:
+        concession = round((start - final) if direction == "credit" else (final - start), 4)
+
+    # Time to resolution, in seconds, from the task's start timestamp.
+    duration = None
+    started = task.get("started_at")
+    if started:
+        try:
+            duration = round((datetime.now() - datetime.fromisoformat(started)).total_seconds())
+        except Exception:
+            duration = None
+
+    _append_fill({
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "kind": kind,
+        "symbol": symbol,
+        "outcome": status,            # FILLED | EXPIRED | CANCELLED | ERROR
+        "direction": direction,       # credit | debit
+        "start": start,
+        "bound": bound,               # floor (credit) or ceiling (debit)
+        "final": final,               # price it actually rested/filled at
+        "concession": concession,     # unfavorable drift from start
+        "step": step,
+        "cycles": cycles,
+        "duration_sec": duration,
+    })
+
+
+@app.route("/api/fills")
+def api_fills():
+    """Return chaser history (most recent first) plus a small summary.
+
+    Summary is computed over FILLED runs so the averages are meaningful:
+      - fill_rate:        FILLED / total runs
+      - avg_cycles:       mean cycles among fills
+      - avg_concession:   mean unfavorable drift from start among fills
+      - avg_seconds:      mean time-to-fill among fills
+    """
+    try:
+        with open(_FILLS_PATH) as f:
+            records = json.load(f)
+            if not isinstance(records, list):
+                records = []
+    except (FileNotFoundError, json.JSONDecodeError):
+        records = []
+
+    total = len(records)
+    fills = [r for r in records if r.get("outcome") == "FILLED"]
+
+    def _avg(vals):
+        vals = [v for v in vals if v is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    summary = {
+        "total": total,
+        "filled": len(fills),
+        "fill_rate": round(len(fills) / total * 100, 1) if total else None,
+        "avg_cycles": _avg([r.get("cycles") for r in fills]),
+        "avg_concession": _avg([r.get("concession") for r in fills]),
+        "avg_seconds": _avg([r.get("duration_sec") for r in fills]),
+    }
+    # Newest first, cap what we send to the UI.
+    return jsonify({"summary": summary, "records": list(reversed(records))[:100]})
+
+
+# ── Premium yield ──────────────────────────────────────────────────────
+def _premium_yield_rows(t) -> list:
+    """Rank short option positions by the annualized yield still left in them.
+
+    The idea: a short option you've already sold is "earning" only its
+    REMAINING time value (extrinsic). Intrinsic value isn't income — if the
+    option is ITM that's money you'd forfeit on assignment, not collect. So
+    for each short option we compute:
+
+        time_value   = current mark − intrinsic
+        ann_yield_%  = time_value / strike × (365 / days_to_expiry) × 100
+
+    High annualized yield  → still paying you well; let it ride.
+    Low annualized yield   → premium nearly exhausted; roll or close to free
+                             the capital and sell something fresh.
+    ITM flag               → assignment risk; consider rolling up/out.
+
+    Current mark is derived from the position's own market value (no extra
+    quote call per option); the underlying spot is fetched once per ticker.
+    """
+    port = t.portfolio()
+    today = datetime.now().date()
+    spot_cache: dict = {}
+    rows = []
+
+    for p in port.get("positions", []):
+        symbol = p.instrument.symbol if hasattr(p, "instrument") else ""
+        parsed = parse_occ_symbol(symbol)
+        if parsed is None:
+            continue
+        qty = float(p.quantity) if hasattr(p, "quantity") else 0
+        if qty >= 0:
+            continue  # only SHORT options collect premium
+
+        n = abs(qty)
+        strike = parsed["strike"]
+        ticker = parsed["ticker"]
+        is_call = parsed["option_type"] == "CALL"
+
+        # Current per-share mark from market value (|value| / (contracts × 100)).
+        mv = float(p.current_value) if hasattr(p, "current_value") and p.current_value is not None else 0.0
+        mark = abs(mv) / (n * 100) if n else 0.0
+
+        # Days to expiry (floor at 1 so same-day positions don't divide by zero).
+        try:
+            exp_date = datetime.strptime(parsed["expiry"], "%Y-%m-%d").date()
+            dte = max((exp_date - today).days, 1)
+        except ValueError:
+            dte = 1
+
+        # Underlying spot (cached per ticker) → intrinsic → time value.
+        if ticker not in spot_cache:
+            try:
+                q = t.quote(ticker)
+                spot_cache[ticker] = float(q["last"]) if q and q.get("last") else None
+            except Exception:
+                spot_cache[ticker] = None
+        spot = spot_cache[ticker]
+
+        if spot is not None:
+            intrinsic = max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
+            itm = (spot > strike) if is_call else (spot < strike)
+            # Distance to strike as % of spot (negative = OTM cushion).
+            dist_pct = round((spot - strike) / spot * 100 * (1 if is_call else -1), 2)
+        else:
+            intrinsic, itm, dist_pct = 0.0, None, None
+
+        time_value = max(0.0, mark - intrinsic)
+        ann_yield = round(time_value / strike * (365 / dte) * 100, 1) if strike > 0 else None
+
+        rows.append({
+            "symbol": symbol,
+            "friendly": parsed["friendly"],
+            "option_type": parsed["option_type"],
+            "contracts": int(n),
+            "strike": strike,
+            "expiry": parsed["expiry"],
+            "dte": dte,
+            "spot": round(spot, 2) if spot is not None else None,
+            "mark": round(mark, 2),
+            "time_value": round(time_value, 2),
+            "ann_yield_pct": ann_yield,
+            "dist_pct": dist_pct,
+            "itm": itm,
+        })
+
+    # Best-earning first; unknown yields sink to the bottom.
+    rows.sort(key=lambda r: (r["ann_yield_pct"] is not None, r["ann_yield_pct"] or 0), reverse=True)
+    return rows
+
+
+@app.route("/api/premium-yield")
+def api_premium_yield():
+    t = get_trader()
+    try:
+        return jsonify({"rows": _premium_yield_rows(t)})
+    except Exception as e:
+        return jsonify({"error": f"Premium yield failed: {e}"}), 500
+
+
+
 @app.route("/api/spread/prepare", methods=["POST"])
 def api_spread_prepare():
     """Prepare a call debit spread and return the preflight summary."""
@@ -1111,7 +1337,14 @@ def _categorize_chaser_error(error: str) -> dict:
 
 
 def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
-    """Background thread that runs the auto-increment chaser."""
+    """Background thread that runs the auto-increment chaser (call debit spread).
+
+    Walks the limit DEBIT *up* (toward the spread width ceiling) each cycle
+    until filled — debit spreads pay more as you bid higher. Records the
+    outcome to the fill log on exit via `finally`.
+    """
+    # Logging context — set as values become known; read in `finally`.
+    log_symbol = log_start = log_bound = log_step = None
     try:
         t = get_trader()
         po = t._pending.get(token)
@@ -1123,6 +1356,8 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         contracts = pf.get("contracts", 1)
         buy_leg = pf["buy"]
         sell_leg = pf["sell"]
+        # Underlying ticker for the fill log (strip the 15-char OCC suffix).
+        log_symbol = buy_leg["symbol"][:-15] if len(buy_leg["symbol"]) > 15 else buy_leg["symbol"]
 
         from public_api_sdk import (
             MultilegOrderRequest,
@@ -1182,6 +1417,11 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         if max_cap is not None:
             user_cap = Decimal(str(max_cap))
             ceiling = min(ceiling, user_cap)
+
+        # Snapshot the chase bounds for the fill log.
+        log_start = float(str(current_limit))
+        log_bound = float(str(ceiling))
+        log_step = float(str(escalation))
 
         consecutive_errors = 0
 
@@ -1315,6 +1555,9 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         with _chaser_lock:
             _chaser_tasks[task_id]["status"] = "ERROR"
             _chaser_tasks[task_id]["error"] = _categorize_chaser_error(error_msg)
+    finally:
+        _log_chaser_result(task_id, "spread", log_symbol, log_start,
+                           log_bound, log_step, "debit")
 
 
 def _run_roll_chaser_thread(task_id: str, token: str):
@@ -1322,8 +1565,11 @@ def _run_roll_chaser_thread(task_id: str, token: str):
 
     Starts at the user's limit credit and steps down by the detected increment
     each cycle until the order fills or the floor credit is reached. Credit
-    orders use a NEGATIVE limit price (limit_price = -credit).
+    orders use a NEGATIVE limit price (limit_price = -credit). Records the
+    outcome to the fill log on exit via `finally`.
     """
+    # Logging context — set once info is read; logged in `finally`.
+    log_symbol = log_start = log_bound = log_step = None
     try:
         info = _roll_pending.get(token)
         if not info:
@@ -1348,6 +1594,8 @@ def _run_roll_chaser_thread(task_id: str, token: str):
         start_credit = Decimal(str(info["limit_credit"]))
         floor_credit = Decimal(str(info["min_credit"]))
         step = Decimal(str(info["increment"]))
+        log_symbol = info.get("ticker")
+        log_start, log_bound, log_step = float(start_credit), float(floor_credit), float(step)
 
         order_id = str(uuid.uuid4())
         req = MultilegOrderRequest(
@@ -1541,8 +1789,10 @@ def _run_roll_chaser_thread(task_id: str, token: str):
             _chaser_tasks[task_id]["status"] = "ERROR"
             _chaser_tasks[task_id]["error"] = _categorize_chaser_error(str(e))
     finally:
-        # Release the prepared-roll record regardless of outcome.
+        # Release the prepared-roll record and log the outcome.
         _roll_pending.pop(token, None)
+        _log_chaser_result(task_id, "roll", log_symbol, log_start,
+                           log_bound, log_step, "credit")
 
 
 def _run_cc_chaser_thread(task_id: str, token: str):
@@ -1551,7 +1801,10 @@ def _run_cc_chaser_thread(task_id: str, token: str):
     Single-leg sell-to-open: starts at the user's limit credit and steps down
     by the increment each cycle until filled or the floor has rested without
     a fill. Single-leg sell limits are POSITIVE prices (unlike multileg
-    credit orders, which use negative limits)."""
+    credit orders, which use negative limits). Records the outcome to the fill
+    log on exit via `finally`."""
+    # Logging context — set once info is read; logged in `finally`.
+    log_symbol = log_start = log_bound = log_step = None
     try:
         info = _cc_pending.get(token)
         if not info:
@@ -1574,6 +1827,8 @@ def _run_cc_chaser_thread(task_id: str, token: str):
         start_credit = Decimal(str(info["limit_credit"]))
         floor_credit = Decimal(str(info["min_credit"]))
         step = Decimal(str(info["increment"]))
+        log_symbol = info.get("symbol")
+        log_start, log_bound, log_step = float(start_credit), float(floor_credit), float(step)
 
         poll_interval = 3                 # how often to check a resting order
         level_rest_secs = 12              # let each credit level rest before conceding
@@ -1744,8 +1999,10 @@ def _run_cc_chaser_thread(task_id: str, token: str):
             _chaser_tasks[task_id]["status"] = "ERROR"
             _chaser_tasks[task_id]["error"] = _categorize_chaser_error(str(e))
     finally:
-        # Release the prepared records regardless of outcome.
+        # Release the prepared records and log the outcome.
         _cc_pending.pop(token, None)
+        _log_chaser_result(task_id, "cc", log_symbol, log_start,
+                           log_bound, log_step, "credit")
 
 
 # ── Main ────────────────────────────────────────────────────────────────

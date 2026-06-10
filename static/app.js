@@ -103,6 +103,13 @@ const dom = {
   ccIncrement: $('#cc-increment'),
   ccInfo: $('#cc-info'),
   btnPrepareCc: $('#btn-prepare-cc'),
+  // premium yield
+  yieldResults: $('#yield-results'),
+  btnYieldRefresh: $('#btn-yield-refresh'),
+  // chaser fill analytics
+  fillsSummary: $('#fills-summary'),
+  fillsResults: $('#fills-results'),
+  btnFillsRefresh: $('#btn-fills-refresh'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -567,6 +574,13 @@ async function pollChaser(taskId) {
       dom.chaserError.textContent = msg;
       dom.chaserError.classList.remove('hidden');
     }
+
+    // On any terminal state, refresh analytics: the chaser just logged a
+    // result, and a fill changes the positions feeding premium yield.
+    if (['FILLED', 'CANCELLED', 'EXPIRED', 'ERROR'].includes(status.status)) {
+      loadFills();
+      if (status.status === 'FILLED') loadPremiumYield();
+    }
   } catch (e) {
     console.error('Chaser poll error:', e);
   }
@@ -987,6 +1001,112 @@ async function scanPositionsIv() {
   }
 }
 
+// ── Premium yield ────────────────────────────────────────────────────────
+// Ranks short options by how much annualized return is LEFT in them (their
+// remaining time value). Helps decide what to hold vs roll/close. See the
+// /api/premium-yield docstring for the math.
+async function loadPremiumYield() {
+  dom.yieldResults.innerHTML = '<p class="text-muted">Loading…</p>';
+  try {
+    const data = await apiFetch('/premium-yield');
+    const rows = data.rows || [];
+    if (rows.length === 0) {
+      dom.yieldResults.innerHTML = '<p class="text-muted">No short options. Sell a covered call to start collecting premium.</p>';
+      return;
+    }
+    const body = rows.map((r) => {
+      // Color the annualized yield: green = still earning, muted = exhausted.
+      const y = r.ann_yield_pct;
+      const yCls = y == null ? '' : y >= 20 ? 'positive' : y < 8 ? 'text-muted' : '';
+      const itmTag = r.itm === true
+        ? '<span class="tag tag-warn">ITM</span>'
+        : r.itm === false ? '<span class="tag tag-ok">OTM</span>' : '';
+      const dist = r.dist_pct == null ? '—'
+        : `${r.dist_pct > 0 ? '+' : ''}${fmt(r.dist_pct, 1)}%`;
+      return `<tr>
+        <td class="tl">${r.friendly}</td>
+        <td>${r.dte}d</td>
+        <td>$${fmt(r.time_value)}</td>
+        <td class="${yCls}"><strong>${y == null ? '—' : fmt(y, 0) + '%'}</strong></td>
+        <td>${dist} ${itmTag}</td>
+      </tr>`;
+    }).join('');
+    dom.yieldResults.innerHTML = `
+      <table class="data-table">
+        <thead><tr>
+          <th class="tl">Position</th><th>DTE</th><th>Time val</th>
+          <th>Ann. yield</th><th>Dist→strike</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  } catch (e) {
+    dom.yieldResults.innerHTML = `<p class="error">Premium yield failed: ${e.message}</p>`;
+  }
+}
+
+// ── Chaser fill analytics ──────────────────────────────────────────────────
+const OUTCOME_CLS = { FILLED: 'positive', EXPIRED: 'text-muted', CANCELLED: 'text-muted', ERROR: 'negative' };
+
+async function loadFills() {
+  dom.fillsResults.innerHTML = '<p class="text-muted">Loading…</p>';
+  try {
+    const data = await apiFetch('/fills');
+    const s = data.summary || {};
+    const recs = data.records || [];
+
+    if (s.total === 0) {
+      dom.fillsSummary.innerHTML = '';
+      dom.fillsResults.innerHTML = '<p class="text-muted">No chaser runs yet. Place a spread, roll, or covered call and results land here.</p>';
+      return;
+    }
+
+    dom.fillsSummary.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat"><span class="stat-num">${s.fill_rate == null ? '—' : fmt(s.fill_rate, 0) + '%'}</span><span class="stat-lbl">fill rate</span></div>
+        <div class="stat"><span class="stat-num">${s.avg_cycles == null ? '—' : fmt(s.avg_cycles, 1)}</span><span class="stat-lbl">avg cycles</span></div>
+        <div class="stat"><span class="stat-num">${s.avg_concession == null ? '—' : '$' + fmt(s.avg_concession)}</span><span class="stat-lbl">avg concession</span></div>
+        <div class="stat"><span class="stat-num">${s.avg_seconds == null ? '—' : fmt(s.avg_seconds, 0) + 's'}</span><span class="stat-lbl">avg fill time</span></div>
+      </div>
+      <p class="stat-foot">${s.filled} filled of ${s.total} runs</p>`;
+
+    const body = recs.map((r) => {
+      const oCls = OUTCOME_CLS[r.outcome] || '';
+      const conc = r.concession == null ? '—'
+        : (r.concession <= 0 ? 'first try' : `$${fmt(r.concession)}`);
+      const when = (r.ts || '').replace('T', ' ').slice(5, 16); // MM-DD HH:MM
+      return `<tr>
+        <td class="tl">${when}</td>
+        <td>${r.kind}</td>
+        <td class="tl">${r.symbol || '—'}</td>
+        <td class="${oCls}">${r.outcome}</td>
+        <td>${r.final == null ? '—' : '$' + fmt(r.final)}</td>
+        <td>${r.cycles ?? '—'}</td>
+        <td>${conc}</td>
+      </tr>`;
+    }).join('');
+    dom.fillsResults.innerHTML = `
+      <table class="data-table">
+        <thead><tr>
+          <th class="tl">When</th><th>Type</th><th class="tl">Sym</th>
+          <th>Outcome</th><th>Fill</th><th>Cyc</th><th>Concession</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  } catch (e) {
+    dom.fillsSummary.innerHTML = '';
+    dom.fillsResults.innerHTML = `<p class="error">Fill analytics failed: ${e.message}</p>`;
+  }
+}
+
+// ── Panel info toggles ─────────────────────────────────────────────────────
+// Each panel's ⓘ button shows/hides the concise help blurb in that section.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.info-btn');
+  if (!btn) return;
+  const help = btn.closest('section')?.querySelector('.panel-help');
+  if (help) help.classList.toggle('hidden');
+});
+
 // ── Event wiring ───────────────────────────────────────────────────────
 dom.btnFetchChain.addEventListener('click', async () => {
   const sym = dom.symInput.value.trim().toUpperCase();
@@ -1077,6 +1197,12 @@ dom.symInput.addEventListener('keydown', (e) => {
   }
 });
 
+// Premium yield + fill analytics wiring
+dom.btnYieldRefresh.addEventListener('click', loadPremiumYield);
+dom.btnFillsRefresh.addEventListener('click', loadFills);
+
 // ── Init ───────────────────────────────────────────────────────────────
 loadAccount();
 setInterval(loadAccount, ACCOUNT_REFRESH_MS);
+loadPremiumYield();
+loadFills();

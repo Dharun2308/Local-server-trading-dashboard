@@ -126,6 +126,137 @@ section h2 {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Panel info (ⓘ) toggles ──────────────────────────────────────────── */
+.info-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.info-btn:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* A small button living in a header (e.g. Refresh) sits at the far right. */
+h2 .btn-sm {
+  margin-left: auto;
+  padding: 2px 10px;
+  font-size: 0.7rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.panel-help {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.panel-help strong { color: var(--text); }
+
+/* ── Data tables (yield, fills) ──────────────────────────────────────── */
+#yield-results,
+#fills-results {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table th {
+  text-align: right;
+  padding: 5px 8px;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-table td {
+  text-align: right;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-table .tl { text-align: left; }
+.data-table tr:hover td { background: rgba(88, 166, 255, 0.05); }
+.data-table .positive { color: var(--positive); }
+.data-table .negative { color: var(--negative); }
+
+.tag {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 2px;
+}
+
+.tag-warn { color: var(--danger); background: rgba(248, 81, 73, 0.14); }
+.tag-ok { color: var(--success); background: rgba(63, 185, 80, 0.12); }
+
+/* ── Fill analytics summary stats ────────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 4px;
+}
+
+.stat-num {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.stat-lbl {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+
+.stat-foot {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: 10px;
 }
 
 /* ── Positions ───────────────────────────────────────────────────────── */
