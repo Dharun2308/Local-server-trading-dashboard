@@ -1441,6 +1441,11 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_limit))
+                # Refresh the status line now so a poll during placement
+                # doesn't show the previous level's message.
+                _chaser_tasks[task_id]["last_warning"] = (
+                    f"cycle {cycle}/{max_cycles}: limit ${current_limit} — placing"
+                )
 
             # Place + poll inside a try so transient (non-fatal) API errors can
             # be retried instead of killing the whole chaser thread.
@@ -1667,6 +1672,12 @@ def _run_roll_chaser_thread(task_id: str, token: str):
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_credit))
+                # Refresh the status line now so a poll during placement
+                # doesn't show the previous level's message.
+                _chaser_tasks[task_id]["last_warning"] = (
+                    ("resting at floor" if at_floor else f"level {cycle}/{max_cycles}")
+                    + f": credit ${current_credit} — placing"
+                )
 
             # Place ONE order at this credit level.
             try:
@@ -1872,6 +1883,12 @@ def _run_cc_chaser_thread(task_id: str, token: str):
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_credit))
+                # Refresh the status line now so a poll during placement
+                # doesn't show the previous level's message.
+                _chaser_tasks[task_id]["last_warning"] = (
+                    ("resting at floor" if at_floor else f"level {cycle}/{max_cycles}")
+                    + f": credit ${current_credit} — placing"
+                )
 
             # Place ONE order at this credit level (fresh order_id every time —
             # it's an idempotency key; reuse would no-op to the first order).
