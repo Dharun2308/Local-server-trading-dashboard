@@ -1172,7 +1172,6 @@ async function loadCoreMonitor() {
     const buf = d.buffer_pct;
     const bufCls = buf >= d.warn_buffer_pct ? 'positive' : buf >= d.urgent_buffer_pct ? 'cm-warn' : 'negative';
     const i = d.interest || {};
-    const sf = i.self_funding;
     const assumed = (d.positions || []).filter((p) => p.maint_source === 'assumed_max');
 
     // Per-position maintenance table (collapsed into a details element).
@@ -1202,14 +1201,11 @@ async function loadCoreMonitor() {
           <span class="cm-big">$${fmt(i.monthly_accrued_estimate, 0)}/mo</span>
           <span class="cm-sub">${fmt(i.apr * 100, 2)}% APR · $${fmt(i.annualized_cost_estimate, 0)}/yr on $${fmt(d.loan, 0)} loan</span>
           <span class="cm-sub">30d income: div $${fmt(i.dividends_30d)} (${i.dividends_source})</span>
-          <span class="cm-sub">30d premiums: $${fmt(i.premiums_30d)}</span>
-          <span class="cm-sub ${sf ? 'positive' : 'negative'}">Loan self-funding: ${sf ? 'YES' : 'NO'} (net $${fmt(i.net_monthly)}/mo)</span>
         </div>
         <div class="cm-widget">
           <span class="cm-label">Cash / sweep</span>
           <span class="cm-big">$${fmt(d.cash, 0)}</span>
           <span class="cm-sub">${(d.sweep && d.sweep.text) || ''}</span>
-          <span class="cm-sub text-muted">display only — nothing here trades</span>
         </div>
       </div>
       ${assumed.length ? `<p class="cm-sub negative">⚠ ${assumed.map((p) => p.symbol).join(', ')}: maintenance rate unavailable from API — assumed 100% (conservative).</p>` : ''}
