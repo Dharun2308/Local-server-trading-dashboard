@@ -1200,8 +1200,9 @@ async function loadCoreMonitor() {
         <div class="cm-widget">
           <span class="cm-label">Margin interest (estimate)</span>
           <span class="cm-big">$${fmt(i.monthly_accrued_estimate, 0)}/mo</span>
-          <span class="cm-sub">${fmt(i.apr * 100, 2)}% APR (config — verify in Public app) · $${fmt(i.annualized_cost_estimate, 0)}/yr on $${fmt(d.loan, 0)} loan</span>
-          <span class="cm-sub">30d income: div $${fmt(i.dividends_30d)} (${i.dividends_source}) + premiums $${fmt(i.premiums_30d)}</span>
+          <span class="cm-sub">${fmt(i.apr * 100, 2)}% APR · $${fmt(i.annualized_cost_estimate, 0)}/yr on $${fmt(d.loan, 0)} loan</span>
+          <span class="cm-sub">30d income: div $${fmt(i.dividends_30d)} (${i.dividends_source})</span>
+          <span class="cm-sub">30d premiums: $${fmt(i.premiums_30d)}</span>
           <span class="cm-sub ${sf ? 'positive' : 'negative'}">Loan self-funding: ${sf ? 'YES' : 'NO'} (net $${fmt(i.net_monthly)}/mo)</span>
         </div>
         <div class="cm-widget">
