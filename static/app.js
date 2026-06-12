@@ -125,6 +125,18 @@ function fmt(n, decimals = 2) {
   return Number(n).toFixed(decimals);
 }
 
+// Delta off a chain leg (greeks come back as strings; null when missing).
+function legDelta(leg) {
+  const d = parseFloat(leg?.greeks?.delta);
+  return isNaN(d) ? null : d;
+}
+
+// " · Δ 0.31" suffix, or empty string when the chain has no delta.
+function deltaTag(leg) {
+  const d = legDelta(leg);
+  return d == null ? '' : ` · Δ ${fmt(d, 2)}`;
+}
+
 function disable(els, yes = true) {
   (Array.isArray(els) ? els : [els]).forEach((el) => {
     el.disabled = yes;
@@ -407,8 +419,11 @@ function updateSpreadQuote(buy, sell) {
   const netBid = buyLeg.bid - sellLeg.ask;
   const netMid = buyLeg.mid - sellLeg.mid;
   const netAsk = buyLeg.ask - sellLeg.bid;
+  const bd = legDelta(buyLeg);
+  const sd = legDelta(sellLeg);
+  const netDelta = bd != null && sd != null ? ` · net Δ ${fmt(bd - sd, 2)}` : '';
   dom.spreadQuoteLabel.textContent =
-    `Spread: mid $${fmt(netMid)} (bid $${fmt(netBid)} / ask $${fmt(netAsk)})`;
+    `Spread: mid $${fmt(netMid)} (bid $${fmt(netBid)} / ask $${fmt(netAsk)})${netDelta}`;
 }
 
 function updateSpreadInfo() {
@@ -717,7 +732,7 @@ async function onRollExpChange() {
     dom.rollStrike.innerHTML =
       '<option value="">— Select strike —</option>' +
       calls
-        .map((c) => `<option value="${c.strike}">$${fmt(c.strike, 1)} (mid ${fmt(c.mid)})</option>`)
+        .map((c) => `<option value="${c.strike}">$${fmt(c.strike, 1)} (mid ${fmt(c.mid)}${deltaTag(c)})</option>`)
         .join('');
     dom.rollStrike.disabled = false;
   } catch (e) {
@@ -735,7 +750,7 @@ function onRollStrikeChange() {
   const leg = state.rollChain[strike];
   if (!leg) return;
   const target =
-    `Target $${fmt(strike, 1)}C — mid $${fmt(leg.mid)} (bid $${fmt(leg.bid)} / ask $${fmt(leg.ask)})`;
+    `Target $${fmt(strike, 1)}C — mid $${fmt(leg.mid)} (bid $${fmt(leg.bid)} / ask $${fmt(leg.ask)})${deltaTag(leg)}`;
   const old = state.rollOldLeg;
   if (old) {
     // Combined quote for the roll (sell new − buy back old):
@@ -745,7 +760,7 @@ function onRollStrikeChange() {
     const netAsk = leg.ask - old.bid;
     dom.rollInfo.textContent =
       `Net roll credit — mid $${fmt(netMid)} (bid $${fmt(netBid)} / ask $${fmt(netAsk)}) · ` +
-      `buy back mid $${fmt(old.mid)} · ${target}`;
+      `buy back mid $${fmt(old.mid)}${deltaTag(old)} · ${target}`;
   } else {
     dom.rollInfo.textContent = target;
   }
@@ -894,7 +909,7 @@ async function onCcExpChange() {
     dom.ccStrike.innerHTML =
       '<option value="">— Select strike —</option>' +
       calls
-        .map((c) => `<option value="${c.strike}">$${fmt(c.strike, 1)} (mid ${fmt(c.mid)})</option>`)
+        .map((c) => `<option value="${c.strike}">$${fmt(c.strike, 1)} (mid ${fmt(c.mid)}${deltaTag(c)})</option>`)
         .join('');
     dom.ccStrike.disabled = false;
 
@@ -924,7 +939,7 @@ function onCcStrikeChange() {
     ? (strike > state.ccSpot ? 'OTM' : 'ITM — caps upside below spot')
     : '';
   dom.ccInfo.textContent =
-    `$${fmt(strike, 1)}C — bid $${fmt(leg.bid)} / mid $${fmt(leg.mid)} / ask $${fmt(leg.ask)}` +
+    `$${fmt(strike, 1)}C — bid $${fmt(leg.bid)} / mid $${fmt(leg.mid)} / ask $${fmt(leg.ask)}${deltaTag(leg)}` +
     (otmLabel ? ` (${otmLabel})` : '');
   // Suggest a chase range: start near ask, floor near bid (placeholders only —
   // never overwrite what the user typed).
