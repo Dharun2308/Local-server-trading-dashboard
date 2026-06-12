@@ -490,7 +490,6 @@ def compute_monitor(trader, config: dict | None = None, fills_path: str | None =
             "source": div_source,
             "avg_monthly": divs["avg_monthly"],
             "months_observed": divs["months_observed"],
-            "projected_annual": dividend_projected_annual(stock_positions),
         },
         "sweep": sweep,
         "warn_buffer_pct": round(config["warn_buffer"] * 100, 1),

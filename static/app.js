@@ -1207,7 +1207,6 @@ async function loadCoreMonitor() {
           <span class="cm-big">$${fmt(dv.income_30d)}</span>
           <span class="cm-sub">30d income (${dv.source || '—'})</span>
           <span class="cm-sub">avg: $${fmt(dv.avg_monthly)}/mo over ${fmt(dv.months_observed, 1)}m</span>
-          <span class="cm-sub">projected: $${fmt(dv.projected_annual)}/yr (yfinance est)</span>
         </div>
       </div>
       ${assumed.length ? `<p class="cm-sub negative">⚠ ${assumed.map((p) => p.symbol).join(', ')}: maintenance rate unavailable from API — assumed 100% (conservative).</p>` : ''}
