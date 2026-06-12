@@ -1183,9 +1183,9 @@ async function loadCoreMonitor() {
     dom.cmBody.innerHTML = `
       <div class="cm-grid">
         <div class="cm-widget">
-          <span class="cm-label">Leverage (gross ÷ equity)</span>
+          <span class="cm-label">Leverage (gross ÷ equity) · target ${fmt(d.target_leverage, 2)}</span>
           <span class="cm-big ${levCls}">${lev == null ? '—' : fmt(lev, 2)}</span>
-          <span class="cm-sub">target ${fmt(d.target_leverage, 2)} · gross $${fmt(d.gross_positions, 0)} · equity $${fmt(d.equity, 0)}</span>
+          <span class="cm-sub">Gross: $${fmt(d.gross_positions, 0)} · Equity: $${fmt(d.equity, 0)} · Cash: $${fmt(d.cash, 0)}</span>
         </div>
         <div class="cm-widget">
           <span class="cm-label">Eviction distance</span>
@@ -1201,11 +1201,6 @@ async function loadCoreMonitor() {
           <span class="cm-big">$${fmt(i.monthly_accrued_estimate, 0)}/mo</span>
           <span class="cm-sub">${fmt(i.apr * 100, 2)}% APR · $${fmt(i.annualized_cost_estimate, 0)}/yr on $${fmt(d.loan, 0)} loan</span>
           <span class="cm-sub">30d income: div $${fmt(i.dividends_30d)} (${i.dividends_source})</span>
-        </div>
-        <div class="cm-widget">
-          <span class="cm-label">Cash / sweep</span>
-          <span class="cm-big">$${fmt(d.cash, 0)}</span>
-          <span class="cm-sub">${(d.sweep && d.sweep.text) || ''}</span>
         </div>
       </div>
       ${assumed.length ? `<p class="cm-sub negative">⚠ ${assumed.map((p) => p.symbol).join(', ')}: maintenance rate unavailable from API — assumed 100% (conservative).</p>` : ''}
