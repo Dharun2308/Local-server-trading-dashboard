@@ -168,8 +168,13 @@ async function loadAccount() {
     dom.badge.className = 'badge connected';
     dom.updated.textContent = `updated ${new Date().toLocaleTimeString()}`;
 
-    // Render positions
-    const pos = data.positions || [];
+    // Render positions, nearest expiration first (ticker/strike tiebreak).
+    const pos = (data.positions || []).slice().sort(
+      (a, b) =>
+        (a.expiry || '').localeCompare(b.expiry || '') ||
+        a.symbol.slice(0, -15).localeCompare(b.symbol.slice(0, -15)) ||
+        (a.strike || 0) - (b.strike || 0)
+    );
     const header = document.getElementById('positions-header');
     if (pos.length === 0) {
       dom.posList.innerHTML = '<p class="text-muted">No options positions</p>';
