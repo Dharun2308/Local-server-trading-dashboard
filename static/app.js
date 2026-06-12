@@ -54,6 +54,7 @@ const dom = {
   limitDebitInput: $('#limit-debit'),
   maxCapInput: $('#max-cap'),
   spreadWidthLabel: $('#spread-width-label'),
+  spreadQuoteLabel: $('#spread-quote-label'),
   maxDebitLabel: $('#max-debit-label'),
   btnPrepare: $('#btn-prepare'),
   // preflight modal
@@ -290,6 +291,7 @@ async function loadChain(symbol, expiration) {
     renderChain(data.calls);
     show(dom.chainContainer);
     show(dom.spreadConfig);
+    updateSpreadInfo();  // refresh the spread quote with the new chain prices
   } catch (e) {
     console.error('Chain failed:', e);
     toast(`Couldn't load strikes: ${e.message}`, 'error');
@@ -384,6 +386,24 @@ function highlightSelectedStrikes() {
   });
 }
 
+// Combined quote for the spread (buy lower call, sell higher call):
+// ask = cross the market on both legs (natural cost), bid = the reverse.
+function updateSpreadQuote(buy, sell) {
+  const calls = state.chain?.calls || [];
+  const find = (k) => calls.find((c) => Math.abs(c.strike - k) < 0.001);
+  const buyLeg = buy != null ? find(buy) : null;
+  const sellLeg = sell != null ? find(sell) : null;
+  if (!buyLeg || !sellLeg) {
+    dom.spreadQuoteLabel.textContent = 'Spread: —';
+    return;
+  }
+  const netBid = buyLeg.bid - sellLeg.ask;
+  const netMid = buyLeg.mid - sellLeg.mid;
+  const netAsk = buyLeg.ask - sellLeg.bid;
+  dom.spreadQuoteLabel.textContent =
+    `Spread: mid $${fmt(netMid)} (bid $${fmt(netBid)} / ask $${fmt(netAsk)})`;
+}
+
 function updateSpreadInfo() {
   const buy = state.buyStrike;
   const sell = state.sellStrike;
@@ -391,6 +411,7 @@ function updateSpreadInfo() {
     dom.spreadWidthLabel.textContent = 'Width: —';
     dom.spreadWidthLabel.classList.remove('invalid');
     dom.maxDebitLabel.textContent = 'Max Debit: —';
+    dom.spreadQuoteLabel.textContent = 'Spread: —';
     return;
   }
 
@@ -403,12 +424,14 @@ function updateSpreadInfo() {
     dom.spreadWidthLabel.textContent = 'Width: invalid — buy strike must be below sell strike';
     dom.spreadWidthLabel.classList.add('invalid');
     dom.maxDebitLabel.textContent = 'Max Debit: —';
+    dom.spreadQuoteLabel.textContent = 'Spread: —';
     return;
   }
   dom.spreadWidthLabel.classList.remove('invalid');
 
   dom.spreadWidthLabel.textContent = `Width: $${fmt(width)}`;
   dom.maxDebitLabel.textContent = `Max Debit: $${fmt(maxDebit, 0)} (${fmt(width * 100, 0)}/contract)`;
+  updateSpreadQuote(buy, sell);
 
   // Auto-fill limit debit as % of width if empty
   if (!dom.limitDebitInput.value && width > 0) {
