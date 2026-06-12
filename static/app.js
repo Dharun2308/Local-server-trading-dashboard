@@ -1191,8 +1191,8 @@ async function loadCoreMonitor() {
         <div class="cm-widget">
           <span class="cm-label">Eviction distance</span>
           <span class="cm-big ${bufCls}">${buf >= 100 ? '100' : fmt(buf, 1)}%</span>
-          <span class="cm-sub">portfolio can fall ${fmt(buf, 1)}% before a maintenance call
-            · maint req now $${fmt(d.maintenance_required_now, 0)}</span>
+          <span class="cm-sub">Portfolio can fall ${fmt(buf, 1)}% before a maintenance call</span>
+          <span class="cm-sub">Maint. req now $${fmt(d.maintenance_required_now, 0)}</span>
           ${d.restore && (d.restore.deposit > 0 || d.restore.reduce_positions > 0)
             ? `<span class="cm-sub negative">restore ${fmt(d.restore_buffer_pct, 0)}% buffer: deposit $${fmt(d.restore.deposit, 0)} or reduce positions $${fmt(d.restore.reduce_positions, 0)}</span>`
             : ''}
