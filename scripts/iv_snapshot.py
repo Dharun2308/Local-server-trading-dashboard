@@ -12,6 +12,7 @@ when any ticker fails so the wrapper surfaces it.
 import json
 import ssl
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -34,15 +35,21 @@ def main() -> int:
         if len(occ) > 15:
             tickers.add(occ[:-15])
 
-    failures = []
+    failures, skipped = [], []
     for sym in sorted(tickers):
         try:
             get(f"/api/ivrank?symbol={urllib.parse.quote(sym)}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:   # no option chain (delisted etc.) — permanent, not an error
+                skipped.append(sym)
+            else:
+                failures.append(f"{sym}: {e}")
         except Exception as e:
             failures.append(f"{sym}: {e}")
 
-    ok = len(tickers) - len(failures)
+    ok = len(tickers) - len(failures) - len(skipped)
     print(f"IV snapshot: {ok}/{len(tickers)} tickers recorded"
+          + (f"; skipped (no chain): {', '.join(skipped)}" if skipped else "")
           + (f"; FAILED {', '.join(failures)}" if failures else ""))
     return 1 if failures else 0
 
