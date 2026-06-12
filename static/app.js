@@ -15,6 +15,7 @@ let state = {
   chaserTaskId: null,    // active chaser task, for cancellation
   currentUnderlyingPrice: null,
   rollChain: null,       // target call chain for the roller, by strike
+  rollOldLeg: null,      // quote of the short call being bought back (for net credit)
   lastPositions: [],     // latest /api/account positions (for IV scan + context)
   stockPositions: [],    // latest equity positions (for the CC writer)
   ccChain: null,         // call chain for the CC writer, by strike
@@ -222,7 +223,7 @@ function populateRollPositions(positions) {
         const label = `${p.friendly || p.symbol} (×${qty})`;
         // OCC symbol = ticker + 6-digit date + C/P + 8-digit strike (15 chars).
         const ticker = p.symbol.slice(0, -15);
-        return `<option value="${p.symbol}" data-ticker="${ticker}" data-qty="${qty}">${label}</option>`;
+        return `<option value="${p.symbol}" data-ticker="${ticker}" data-qty="${qty}" data-exp="${p.expiry}" data-strike="${p.strike}">${label}</option>`;
       })
       .join('');
   dom.rollPosition.disabled = false;
@@ -610,12 +611,19 @@ function closeChaser() {
 function selectedRollPosition() {
   const opt = dom.rollPosition.selectedOptions[0];
   if (!opt || !opt.value) return null;
-  return { symbol: opt.value, ticker: opt.dataset.ticker, qty: Number(opt.dataset.qty) };
+  return {
+    symbol: opt.value,
+    ticker: opt.dataset.ticker,
+    qty: Number(opt.dataset.qty),
+    exp: opt.dataset.exp,
+    strike: parseFloat(opt.dataset.strike),
+  };
 }
 
 async function onRollPositionChange() {
   const sel = selectedRollPosition();
   state.rollChain = null;
+  state.rollOldLeg = null;
   dom.rollStrike.innerHTML = '<option value="">— Load expiration —</option>';
   dom.rollStrike.disabled = true;
   dom.rollInfo.textContent = 'Pick a target strike to see its mid.';
@@ -627,6 +635,23 @@ async function onRollPositionChange() {
   show(dom.rollConfig);
   dom.rollContracts.value = sel.qty || 1;
   dom.rollContracts.max = sel.qty || 100;
+
+  // Quote the call being bought back so the info line can show the net roll
+  // credit. Failure just degrades the line to the target leg alone.
+  if (sel.exp && !isNaN(sel.strike)) {
+    apiFetch(`/chain?symbol=${sel.ticker}&expiration=${sel.exp}`)
+      .then((data) => {
+        const leg = (data.calls || []).find(
+          (c) => Math.abs(c.strike - sel.strike) < 0.001
+        );
+        const cur = selectedRollPosition();
+        if (leg && cur && cur.symbol === sel.symbol) {
+          state.rollOldLeg = leg;
+          onRollStrikeChange();
+        }
+      })
+      .catch(() => {});
+  }
 
   dom.rollExp.disabled = true;
   dom.rollExp.innerHTML = '<option value="">Loading…</option>';
@@ -675,9 +700,21 @@ function onRollStrikeChange() {
     return;
   }
   const leg = state.rollChain[strike];
-  if (leg) {
+  if (!leg) return;
+  const target =
+    `Target $${fmt(strike, 1)}C — mid $${fmt(leg.mid)} (bid $${fmt(leg.bid)} / ask $${fmt(leg.ask)})`;
+  const old = state.rollOldLeg;
+  if (old) {
+    // Combined quote for the roll (sell new − buy back old):
+    // bid = fill both legs at the market, ask = both at the far touch.
+    const netBid = leg.bid - old.ask;
+    const netMid = leg.mid - old.mid;
+    const netAsk = leg.ask - old.bid;
     dom.rollInfo.textContent =
-      `Target $${fmt(strike, 1)}C — mid $${fmt(leg.mid)} (bid $${fmt(leg.bid)} / ask $${fmt(leg.ask)})`;
+      `Net roll credit — mid $${fmt(netMid)} (bid $${fmt(netBid)} / ask $${fmt(netAsk)}) · ` +
+      `buy back mid $${fmt(old.mid)} · ${target}`;
+  } else {
+    dom.rollInfo.textContent = target;
   }
 }
 
