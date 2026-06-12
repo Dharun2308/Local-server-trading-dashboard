@@ -1,0 +1,13 @@
+{
+  "target_leverage": 1.75,
+  "leverage_green_band": 0.10,
+  "leverage_red_above": 2.0,
+  "warn_buffer": 0.15,
+  "urgent_buffer": 0.10,
+  "restore_buffer": 0.20,
+  "telegram_recipient": "telegram:Dharun",
+  "margin_rate_apr": 0.049,
+  "margin_rate_source": "public.com published base rate 4.9% APR (as of 2025-12-15, https://public.com/disclosures/margin-rates) — the API does not expose the account's actual rate; verify in the Public app",
+  "maintenance_overrides": {"LILMF": 1.0},
+  "sweep_symbol": "SPLG"
+}

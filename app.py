@@ -397,58 +397,9 @@ def _atm_iv(t, symbol: str) -> tuple[float | None, str, float | None]:
     return None, target, None
 
 
-def _iv_recommendation(iv_rank: float | None, iv_pct: float | None) -> dict:
-    """Action guidance. Prefers rank; falls back to absolute IV when history
-    is still building."""
-    if iv_rank is not None:
-        if iv_rank >= 70:
-            return {
-                "stance": "SELL_PREMIUM",
-                "label": "Rich premium",
-                "text": "IV rank is high — options are expensive. Favor selling: "
-                        "covered calls, rolls for credit, credit spreads. Avoid buying debit spreads.",
-            }
-        if iv_rank >= 30:
-            return {
-                "stance": "NEUTRAL",
-                "label": "Middling",
-                "text": "IV rank is mid-range — no strong edge either way. "
-                        "Trade your directional view; premium is fairly priced.",
-            }
-        return {
-            "stance": "BUY_PREMIUM",
-            "label": "Cheap options",
-            "text": "IV rank is low — options are cheap. Favor debit spreads and buying premium; "
-                    "covered calls collect little here, consider waiting for an IV pop to sell/roll.",
-        }
-    # No rank yet — absolute IV fallback (rough, sector-dependent).
-    if iv_pct is None:
-        return {"stance": "UNKNOWN", "label": "No data", "text": "IV not available from the API for this symbol."}
-    if iv_pct >= 60:
-        return {
-            "stance": "SELL_PREMIUM",
-            "label": "High IV (absolute)",
-            "text": f"ATM IV ≈ {iv_pct:.0f}% is high in absolute terms — selling premium "
-                    "(covered calls / rolls) is favored. Rank will sharpen as history builds.",
-        }
-    if iv_pct >= 30:
-        return {
-            "stance": "NEUTRAL",
-            "label": "Moderate IV (absolute)",
-            "text": f"ATM IV ≈ {iv_pct:.0f}% is moderate. No strong premium edge; "
-                    "rank will sharpen as history builds.",
-        }
-    return {
-        "stance": "BUY_PREMIUM",
-        "label": "Low IV (absolute)",
-        "text": f"ATM IV ≈ {iv_pct:.0f}% is low — premium selling pays little; "
-                "debit structures are relatively cheap. Rank will sharpen as history builds.",
-    }
-
-
 def _iv_assessment(t, symbol: str) -> dict:
-    """Full IV picture for a symbol: current ATM IV, rank (when history
-    allows), and the recommendation. Records today's snapshot as a side
+    """IV picture for a symbol: current ATM IV and rank (when history allows).
+    Data only — no trade recommendation. Records today's snapshot as a side
     effect. Raises ValueError when the symbol has no quote/options."""
     iv_pct, expiration, strike = _atm_iv(t, symbol)
 
@@ -463,7 +414,6 @@ def _iv_assessment(t, symbol: str) -> dict:
         if n_days >= IV_MIN_DAYS_FOR_RANK and hist_high > hist_low:
             iv_rank = round((iv_pct - hist_low) / (hist_high - hist_low) * 100, 1)
 
-    rec = _iv_recommendation(iv_rank, iv_pct)
     return {
         "symbol": symbol,
         "iv_pct": round(iv_pct, 2) if iv_pct is not None else None,
@@ -474,7 +424,6 @@ def _iv_assessment(t, symbol: str) -> dict:
         "history_low": hist_low,
         "history_high": hist_high,
         "min_days_for_rank": IV_MIN_DAYS_FOR_RANK,
-        "recommendation": rec,
     }
 
 
@@ -568,6 +517,8 @@ def _log_chaser_result(task_id: str, kind: str, symbol: str, start: float,
     _append_fill({
         "ts": datetime.now().isoformat(timespec="seconds"),
         "kind": kind,
+        "strategy_tag": task.get("strategy_tag", "untagged"),
+        "contracts": task.get("contracts"),
         "symbol": symbol,
         "outcome": status,            # FILLED | EXPIRED | CANCELLED | ERROR
         "direction": direction,       # credit | debit
@@ -614,6 +565,24 @@ def api_fills():
         "avg_concession": _avg([r.get("concession") for r in fills]),
         "avg_seconds": _avg([r.get("duration_sec") for r in fills]),
     }
+
+    # Per-strategy-tag premium cash flow over FILLED runs: credit fills are
+    # premium collected (+), debit fills premium paid (−), each scaled by
+    # contracts × 100. Pre-tag rows fall into 'untagged' (contracts assumed 1).
+    by_tag: dict = {}
+    for r in records:
+        tag = r.get("strategy_tag") or "untagged"
+        agg = by_tag.setdefault(tag, {"runs": 0, "filled": 0, "net_cash": 0.0})
+        agg["runs"] += 1
+        if r.get("outcome") == "FILLED":
+            agg["filled"] += 1
+            if r.get("final") is not None:
+                amt = float(r["final"]) * 100 * int(r.get("contracts") or 1)
+                agg["net_cash"] += amt if r.get("direction") == "credit" else -amt
+    for agg in by_tag.values():
+        agg["net_cash"] = round(agg["net_cash"], 2)
+    summary["by_tag"] = by_tag
+
     # Newest first, cap what we send to the UI.
     return jsonify({"summary": summary, "records": list(reversed(records))[:100]})
 
@@ -718,6 +687,35 @@ def api_premium_yield():
         return jsonify({"error": f"Premium yield failed: {e}"}), 500
 
 
+# ── Core Monitor (Phase 1 — strictly read-only) ────────────────────────
+import core_monitor as _core_monitor
+
+_cm_cache: dict = {"ts": 0.0, "data": None}
+_cm_lock = threading.Lock()
+CM_CACHE_TTL_SEC = 30   # UI polls; recompute at most every 30s
+
+
+@app.route("/api/core-monitor")
+def api_core_monitor():
+    """Leverage / eviction-distance / interest / sweep snapshot.
+
+    Read-only: portfolio + history + quotes + preflight *calculation* only.
+    Maintenance rates are disk-cached for 12h inside core_monitor."""
+    now = time.time()
+    with _cm_lock:
+        if _cm_cache["data"] is not None and now - _cm_cache["ts"] < CM_CACHE_TTL_SEC:
+            return jsonify(_cm_cache["data"])
+    t = get_trader()
+    try:
+        data = _core_monitor.compute_monitor(t)
+    except Exception as e:
+        return jsonify({"error": f"Core monitor failed: {e}"}), 500
+    with _cm_lock:
+        _cm_cache["ts"] = now
+        _cm_cache["data"] = data
+    return jsonify(data)
+
+
 
 @app.route("/api/spread/prepare", methods=["POST"])
 def api_spread_prepare():
@@ -800,6 +798,8 @@ def api_spread_confirm():
         _chaser_tasks[task_id] = {
             "task_id": task_id,
             "status": "RUNNING",
+            "strategy_tag": "cds_manual",   # fill-analytics tag, set at creation
+            "contracts": int(po.preflight.get("contracts", 1) or 1),
             "order_id": None,
             "cycle": 0,
             "max_cycles": 20,
@@ -1027,6 +1027,8 @@ def api_roll_confirm():
             "task_id": task_id,
             "status": "RUNNING",
             "kind": "roll",
+            "strategy_tag": "cc_roll",      # fill-analytics tag, set at creation
+            "contracts": int(info["contracts"]),
             "order_id": None,
             "cycle": 0,
             "max_cycles": 0,  # set by the chaser once it computes the ladder
@@ -1250,6 +1252,8 @@ def api_cc_confirm():
             "task_id": task_id,
             "status": "RUNNING",
             "kind": "cc",
+            "strategy_tag": "cc_sleeve",    # fill-analytics tag, set at creation
+            "contracts": int(info["contracts"]),
             "order_id": None,
             "cycle": 0,
             "max_cycles": 0,  # set by the chaser once it computes the ladder
@@ -1441,6 +1445,11 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_limit))
+                # Refresh the status line now so a poll during placement
+                # doesn't show the previous level's message.
+                _chaser_tasks[task_id]["last_warning"] = (
+                    f"cycle {cycle}/{max_cycles}: limit ${current_limit} — placing"
+                )
 
             # Place + poll inside a try so transient (non-fatal) API errors can
             # be retried instead of killing the whole chaser thread.
@@ -1667,6 +1676,12 @@ def _run_roll_chaser_thread(task_id: str, token: str):
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_credit))
+                # Refresh the status line now so a poll during placement
+                # doesn't show the previous level's message.
+                _chaser_tasks[task_id]["last_warning"] = (
+                    ("resting at floor" if at_floor else f"level {cycle}/{max_cycles}")
+                    + f": credit ${current_credit} — placing"
+                )
 
             # Place ONE order at this credit level.
             try:
@@ -1872,6 +1887,12 @@ def _run_cc_chaser_thread(task_id: str, token: str):
             with _chaser_lock:
                 _chaser_tasks[task_id]["cycle"] = cycle
                 _chaser_tasks[task_id]["current_limit"] = float(str(current_credit))
+                # Refresh the status line now so a poll during placement
+                # doesn't show the previous level's message.
+                _chaser_tasks[task_id]["last_warning"] = (
+                    ("resting at floor" if at_floor else f"level {cycle}/{max_cycles}")
+                    + f": credit ${current_credit} — placing"
+                )
 
             # Place ONE order at this credit level (fresh order_id every time —
             # it's an idempotency key; reuse would no-op to the first order).
@@ -2019,5 +2040,8 @@ if __name__ == "__main__":
         os.path.join(cert_dir, "cert.pem"),
         os.path.join(cert_dir, "key.pem"),
     )
-    print("Starting Trading Dashboard on https://0.0.0.0:8090")
-    app.run(host="0.0.0.0", port=8090, debug=False, threaded=True, ssl_context=context)
+    # DASHBOARD_PORT override exists for the read-only smoke test (:8091);
+    # production cron deploy runs without it and stays on :8090.
+    port = int(os.environ.get("DASHBOARD_PORT", "8090"))
+    print(f"Starting Trading Dashboard on https://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True, ssl_context=context)

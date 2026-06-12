@@ -111,6 +111,9 @@ const dom = {
   fillsSummary: $('#fills-summary'),
   fillsResults: $('#fills-results'),
   btnFillsRefresh: $('#btn-fills-refresh'),
+  // core monitor
+  cmBody: $('#cm-body'),
+  cmUpdated: $('#cm-updated'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -811,20 +814,14 @@ async function onCcStockChange() {
   dom.ccContracts.value = maxContracts;
   dom.ccContracts.max = maxContracts;
 
-  // Kick off IV check immediately — this is the sell/don't-sell signal.
+  // Kick off IV lookup immediately — shown as data only (rank/IV, no advice).
   renderCcIvChip('IV…', 'iv-neutral');
   apiFetch(`/ivrank?symbol=${symbol}`)
     .then((iv) => {
-      const rec = iv.recommendation || {};
       if (iv.iv_rank != null) {
-        const cls = iv.iv_rank >= 70 ? 'iv-sell' : iv.iv_rank < 30 ? 'iv-warn' : 'iv-neutral';
-        renderCcIvChip(`IV rank ${fmt(iv.iv_rank, 0)} — ${rec.label || ''}`, cls);
-        if (iv.iv_rank < 30) {
-          toast(`${symbol} IV rank ${fmt(iv.iv_rank, 0)} — premium is cheap; weak time to sell covered calls.`, 'error', 6000);
-        }
+        renderCcIvChip(`IV rank ${fmt(iv.iv_rank, 0)} (ATM IV ${fmt(iv.iv_pct, 1)}%)`, ivRankCls(iv.iv_rank));
       } else if (iv.iv_pct != null) {
-        const cls = iv.iv_pct >= 60 ? 'iv-sell' : iv.iv_pct < 30 ? 'iv-warn' : 'iv-neutral';
-        renderCcIvChip(`ATM IV ${fmt(iv.iv_pct, 0)}% (rank ${iv.history_days}/${iv.min_days_for_rank}d)`, cls);
+        renderCcIvChip(`ATM IV ${fmt(iv.iv_pct, 0)}% (rank ${iv.history_days}/${iv.min_days_for_rank}d)`, 'iv-neutral');
       } else {
         renderCcIvChip('IV unavailable', 'iv-neutral');
       }
@@ -946,58 +943,39 @@ async function prepareCc() {
 }
 
 // ── IV rank ──────────────────────────────────────────────────────────────
-const STANCE_META = {
-  SELL_PREMIUM: { cls: 'iv-sell', icon: '▲' },
-  NEUTRAL:      { cls: 'iv-neutral', icon: '◆' },
-  BUY_PREMIUM:  { cls: 'iv-buy', icon: '▼' },
-  UNKNOWN:      { cls: 'iv-neutral', icon: '?' },
-};
+// Data only: rank/IV are displayed without trade advice. Colors grade the
+// rank value itself (high/mid/low), not a recommended action.
+function ivRankCls(rank) {
+  if (rank == null) return 'iv-neutral';
+  return rank >= 70 ? 'iv-sell' : rank < 30 ? 'iv-buy' : 'iv-neutral';
+}
 
 // Unique underlying tickers from current positions (OCC = ticker + 15 chars).
 function positionTickers() {
   return [...new Set(state.lastPositions.map((p) => p.symbol.slice(0, -15)))];
 }
 
-function hasShortCall(ticker) {
-  return state.lastPositions.some(
-    (p) => p.symbol.slice(0, -15) === ticker &&
-           p.option_type === 'CALL' && Number(p.quantity) < 0
-  );
-}
-
 function renderIvCard(data) {
-  const rec = data.recommendation || {};
-  const meta = STANCE_META[rec.stance] || STANCE_META.UNKNOWN;
   const hasRank = data.iv_rank != null;
   const rankPct = hasRank ? Math.min(Math.max(data.iv_rank, 0), 100) : 0;
-
-  let contextNote = '';
-  if (hasShortCall(data.symbol)) {
-    if (rec.stance === 'SELL_PREMIUM') {
-      contextNote = `You hold a short ${data.symbol} call — rolling now collects rich premium.`;
-    } else if (rec.stance === 'BUY_PREMIUM') {
-      contextNote = `You hold a short ${data.symbol} call — buying it back is relatively cheap here; a roll collects little.`;
-    }
-  }
+  const cls = ivRankCls(data.iv_rank);
 
   const rankLine = hasRank
     ? `<div class="iv-rank-row">
          <span class="iv-rank-num">${fmt(data.iv_rank, 0)}</span>
-         <div class="iv-rank-bar"><div class="iv-rank-fill ${meta.cls}" style="width:${rankPct}%"></div></div>
+         <div class="iv-rank-bar"><div class="iv-rank-fill ${cls}" style="width:${rankPct}%"></div></div>
        </div>
        <p class="iv-sub">IV range ${fmt(data.history_low, 0)}–${fmt(data.history_high, 0)}% · ${data.history_days}d of history</p>`
-    : `<p class="iv-sub">Building history: ${data.history_days}/${data.min_days_for_rank} days — using absolute IV until then.</p>`;
+    : `<p class="iv-sub">Building history: ${data.history_days}/${data.min_days_for_rank} days — absolute IV only until then.</p>`;
 
   return `
     <div class="iv-card">
       <div class="iv-card-head">
         <span class="iv-ticker">${data.symbol}</span>
         <span class="iv-pct">ATM IV ${data.iv_pct != null ? fmt(data.iv_pct, 1) + '%' : '—'}</span>
-        <span class="iv-stance ${meta.cls}">${meta.icon} ${rec.label || ''}</span>
+        ${hasRank ? `<span class="iv-stance ${cls}">rank ${fmt(data.iv_rank, 0)}</span>` : ''}
       </div>
       ${rankLine}
-      <p class="iv-text">${rec.text || ''}</p>
-      ${contextNote ? `<p class="iv-context">${contextNote}</p>` : ''}
     </div>`;
 }
 
@@ -1083,6 +1061,19 @@ async function loadPremiumYield() {
 
 // ── Chaser fill analytics ──────────────────────────────────────────────────
 const OUTCOME_CLS = { FILLED: 'positive', EXPIRED: 'text-muted', CANCELLED: 'text-muted', ERROR: 'negative' };
+const TAG_LABEL = { cds_manual: 'spreads (sandbox)', cc_sleeve: 'CC sleeve', cc_roll: 'CC rolls', untagged: 'untagged (pre-tag)' };
+
+// One line per strategy tag: net premium cash flow over filled runs
+// (credit fills collect, debit fills pay; contracts × 100 each).
+function renderTagSummary(byTag) {
+  if (!byTag || Object.keys(byTag).length === 0) return '';
+  const parts = Object.entries(byTag).map(([tag, t]) => {
+    const cls = t.net_cash > 0 ? 'positive' : t.net_cash < 0 ? 'negative' : '';
+    const sign = t.net_cash > 0 ? '+' : '';
+    return `${TAG_LABEL[tag] || tag}: <span class="${cls}">${sign}$${fmt(t.net_cash)}</span> (${t.filled}/${t.runs} filled)`;
+  });
+  return `<p class="stat-foot tag-summary">${parts.join(' · ')}</p>`;
+}
 
 async function loadFills() {
   dom.fillsResults.innerHTML = '<p class="text-muted">Loading…</p>';
@@ -1104,7 +1095,8 @@ async function loadFills() {
         <div class="stat"><span class="stat-num">${s.avg_concession == null ? '—' : '$' + fmt(s.avg_concession)}</span><span class="stat-lbl">avg concession</span></div>
         <div class="stat"><span class="stat-num">${s.avg_seconds == null ? '—' : fmt(s.avg_seconds, 0) + 's'}</span><span class="stat-lbl">avg fill time</span></div>
       </div>
-      <p class="stat-foot">${s.filled} filled of ${s.total} runs</p>`;
+      <p class="stat-foot">${s.filled} filled of ${s.total} runs</p>
+      ${renderTagSummary(s.by_tag)}`;
 
     const body = recs.map((r) => {
       const oCls = OUTCOME_CLS[r.outcome] || '';
@@ -1132,6 +1124,72 @@ async function loadFills() {
   } catch (e) {
     dom.fillsSummary.innerHTML = '';
     dom.fillsResults.innerHTML = `<p class="error">Fill analytics failed: ${e.message}</p>`;
+  }
+}
+
+// ── Core Monitor (read-only) ───────────────────────────────────────────────
+const CM_REFRESH_MS = 60000; // backend caches 30s; UI polls each minute
+
+function cmStatusCls(status) {
+  return status === 'green' ? 'positive' : status === 'red' ? 'negative' : 'cm-warn';
+}
+
+async function loadCoreMonitor() {
+  try {
+    const d = await apiFetch('/core-monitor');
+    dom.cmUpdated.textContent = `as of ${(d.ts || '').replace('T', ' ')}`;
+
+    const lev = d.leverage;
+    const levCls = cmStatusCls(d.leverage_status);
+    const buf = d.buffer_pct;
+    const bufCls = buf >= d.warn_buffer_pct ? 'positive' : buf >= d.urgent_buffer_pct ? 'cm-warn' : 'negative';
+    const i = d.interest || {};
+    const sf = i.self_funding;
+    const assumed = (d.positions || []).filter((p) => p.maint_source === 'assumed_max');
+
+    // Per-position maintenance table (collapsed into a details element).
+    const posRows = (d.positions || []).map((p) =>
+      `<tr><td class="tl">${p.symbol}</td><td>$${fmt(p.value, 0)}</td>` +
+      `<td>${fmt(p.maint_pct, 0)}%${p.maint_source === 'assumed_max' ? ' ⚠assumed' : ''}</td></tr>`
+    ).join('');
+
+    dom.cmBody.innerHTML = `
+      <div class="cm-grid">
+        <div class="cm-widget">
+          <span class="cm-label">Leverage (gross ÷ equity)</span>
+          <span class="cm-big ${levCls}">${lev == null ? '—' : fmt(lev, 2)}</span>
+          <span class="cm-sub">target ${fmt(d.target_leverage, 2)} · gross $${fmt(d.gross_positions, 0)} · equity $${fmt(d.equity, 0)}</span>
+        </div>
+        <div class="cm-widget">
+          <span class="cm-label">Eviction distance</span>
+          <span class="cm-big ${bufCls}">${buf >= 100 ? '100' : fmt(buf, 1)}%</span>
+          <span class="cm-sub">portfolio can fall ${fmt(buf, 1)}% before a maintenance call
+            · maint req now $${fmt(d.maintenance_required_now, 0)}</span>
+          ${d.restore && (d.restore.deposit > 0 || d.restore.reduce_positions > 0)
+            ? `<span class="cm-sub negative">restore ${fmt(d.restore_buffer_pct, 0)}% buffer: deposit $${fmt(d.restore.deposit, 0)} or reduce positions $${fmt(d.restore.reduce_positions, 0)}</span>`
+            : ''}
+        </div>
+        <div class="cm-widget">
+          <span class="cm-label">Margin interest (estimate)</span>
+          <span class="cm-big">$${fmt(i.monthly_accrued_estimate, 0)}/mo</span>
+          <span class="cm-sub">${fmt(i.apr * 100, 2)}% APR (config — verify in Public app) · $${fmt(i.annualized_cost_estimate, 0)}/yr on $${fmt(d.loan, 0)} loan</span>
+          <span class="cm-sub">30d income: div $${fmt(i.dividends_30d)} (${i.dividends_source}) + premiums $${fmt(i.premiums_30d)}</span>
+          <span class="cm-sub ${sf ? 'positive' : 'negative'}">Loan self-funding: ${sf ? 'YES' : 'NO'} (net $${fmt(i.net_monthly)}/mo)</span>
+        </div>
+        <div class="cm-widget">
+          <span class="cm-label">Cash / sweep</span>
+          <span class="cm-big">$${fmt(d.cash, 0)}</span>
+          <span class="cm-sub">${(d.sweep && d.sweep.text) || ''}</span>
+          <span class="cm-sub text-muted">display only — nothing here trades</span>
+        </div>
+      </div>
+      ${assumed.length ? `<p class="cm-sub negative">⚠ ${assumed.map((p) => p.symbol).join(', ')}: maintenance rate unavailable from API — assumed 100% (conservative).</p>` : ''}
+      <details class="cm-details"><summary>per-position maintenance rates</summary>
+        <table class="data-table"><thead><tr><th class="tl">Symbol</th><th>Value</th><th>Maint</th></tr></thead>
+        <tbody>${posRows}</tbody></table>
+      </details>`;
+  } catch (e) {
+    dom.cmBody.innerHTML = `<p class="error">Core monitor failed: ${e.message}</p>`;
   }
 }
 
@@ -1243,3 +1301,5 @@ loadAccount();
 setInterval(loadAccount, ACCOUNT_REFRESH_MS);
 loadPremiumYield();
 loadFills();
+loadCoreMonitor();
+setInterval(loadCoreMonitor, CM_REFRESH_MS);

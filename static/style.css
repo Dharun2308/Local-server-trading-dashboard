@@ -1015,3 +1015,65 @@ select {
     max-width: none;
   }
 }
+
+/* ── Core Monitor (read-only, Phase 1) ───────────────────────────────── */
+#core-monitor-panel {
+  margin-bottom: 16px;
+}
+#core-monitor-panel h2 #cm-updated {
+  font-size: 0.7rem;
+  font-weight: 400;
+  margin-left: auto;
+}
+.cm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+.cm-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.cm-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.cm-big {
+  font-size: 1.6rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.cm-sub {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.cm-warn { color: var(--warning); }
+.cm-details {
+  margin-top: 10px;
+  font-size: 0.8rem;
+}
+.cm-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+/* ── Panel banners (Phase 0.4) ───────────────────────────────────────── */
+.panel-banner {
+  font-size: 0.78rem;
+  color: var(--warning);
+  background: rgba(210, 153, 29, 0.10);
+  border: 1px solid rgba(210, 153, 29, 0.35);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+
+/* Per-tag fill summary line (Phase 0.3) */
+.tag-summary { margin-top: 4px; }

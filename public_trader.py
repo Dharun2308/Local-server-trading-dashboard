@@ -140,6 +140,23 @@ class PublicTrader:
                 return int(float(p.quantity))
         return 0
 
+    def pledged_shares(self, symbol: str) -> int:
+        """Shares already pledged as collateral to existing short calls.
+
+        A short call consumes 100 shares of the underlying; those shares can't
+        cover another call (the API would reject the new sale as naked).
+        """
+        pledged = 0
+        for p in self.portfolio().get("positions", []):
+            sym = p.instrument.symbol if hasattr(p, "instrument") else ""
+            # OCC option symbol = underlying + 15-char suffix (YYMMDD, C/P, strike).
+            if len(sym) <= 15 or sym[:-15] != symbol or sym[-9] != "C":
+                continue
+            qty = float(p.quantity)
+            if qty < 0:
+                pledged += int(-qty) * 100
+        return pledged
+
     def expirations(self, symbol: str) -> list:
         """Return list of expiration date strings for options."""
         from public_api_sdk import OptionExpirationsRequest
@@ -232,9 +249,14 @@ class PublicTrader:
         Returns PendingOrder — user MUST review .summary before calling confirm(token).
         """
         shares = self.shares_held(symbol)
-        if shares < contracts * 100:
+        pledged = self.pledged_shares(symbol)
+        available = shares - pledged
+        if available < contracts * 100:
+            detail = f"holding {shares}"
+            if pledged:
+                detail += f", {pledged} already pledged to existing short calls"
             raise ValueError(
-                f"Insufficient shares: holding {shares}, need {contracts * 100} "
+                f"Insufficient unpledged shares: {detail}; need {contracts * 100} "
                 f"({contracts} contract{'s' if contracts != 1 else ''} × 100) for a covered call."
             )
 
@@ -244,7 +266,8 @@ class PublicTrader:
 
         summary_lines = [
             f"COVERED CALL: Sell {contracts} {symbol} {expiration} C {strike}",
-            f"  Underlying shares held: {shares}",
+            f"  Underlying shares held: {shares}"
+            + (f" ({pledged} pledged to existing short calls, {available} free)" if pledged else ""),
             f"  Option symbol: {opt['symbol']}",
             f"  Bid/Ask: {opt['bid']}/{opt['ask']}  Mid: {opt['mid']}",
         ]
@@ -501,20 +524,6 @@ class PublicTrader:
         limit = pf.get("limit_debit")
 
         order_id = str(uuid.uuid4())
-        req = OrderRequest(
-            order_id=order_id,
-            order_side=OrderSide.BUY,
-            order_type=OrderType.LIMIT,
-            expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
-            quantity=Decimal(str(contracts)),
-        )
-
-        if limit:
-            req.limit_price = Decimal(str(limit))
-        else:
-            # If no limit, use mid-point of spread
-            spread_mid = buy_leg["mid"] - sell_leg["mid"]
-            req.limit_price = Decimal(str(round(spread_mid, 2)))
 
         # Build multi-leg order request
         from public_api_sdk import (
@@ -598,6 +607,9 @@ class PublicTrader:
             if ceiling and current_limit > ceiling:
                 current_limit = ceiling
 
+            # Fresh client order id per placement — order_id is an idempotency
+            # key, so reusing it makes later cycles no-op to the first order.
+            req.order_id = str(uuid.uuid4())
             req.limit_price = current_limit
             if multileg:
                 order = self.client.place_multileg_order(req, account_id=self.account_id)
@@ -677,6 +689,7 @@ class PublicTrader:
         new_sell = pf["new_sell"]
         contracts = pf["contracts"]
         open_limit = pf.get("open_limit_debit")
+        close_limit = pf.get("close_limit")
 
         from public_api_sdk import (
             MultilegOrderRequest,
@@ -686,10 +699,19 @@ class PublicTrader:
             OpenCloseIndicator,
         )
 
+        # The API only accepts LIMIT multi-leg orders. Closing a debit spread
+        # receives a credit (negative limit); without a user limit, cross the
+        # spread (pay the ask, hit the bid) so the order is marketable.
+        if close_limit:
+            close_px = -Decimal(str(close_limit))
+        else:
+            close_px = Decimal(str(round(old_sell["ask"] - old_buy["bid"], 2)))
+
         # Close old spread (sell old buy leg, buy back old sell leg)
         close_req = MultilegOrderRequest(
             order_id=str(uuid.uuid4()),
-            type=OrderType.MARKET,
+            type=OrderType.LIMIT,
+            limit_price=close_px,
             expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
             quantity=int(contracts),
             legs=[
@@ -714,10 +736,15 @@ class PublicTrader:
         self.client.place_multileg_order(close_req, account_id=self.account_id)
         time.sleep(1)
 
-        # Open new spread
+        # Open new spread — LIMIT-only API; without a user limit, cross the
+        # spread (pay the ask on the buy leg, hit the bid on the sell leg).
+        open_px = Decimal(str(open_limit)) if open_limit else Decimal(
+            str(round(new_buy["ask"] - new_sell["bid"], 2))
+        )
         open_req = MultilegOrderRequest(
             order_id=str(uuid.uuid4()),
-            type=OrderType.LIMIT if open_limit else OrderType.MARKET,
+            type=OrderType.LIMIT,
+            limit_price=open_px,
             expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
             quantity=int(contracts),
             legs=[
@@ -740,7 +767,6 @@ class PublicTrader:
             ],
         )
         if open_limit:
-            open_req.limit_price = Decimal(str(open_limit))
             return self._chaser_place(open_req, open_limit, contracts,
                                       "debit_spread", multileg=True)
 

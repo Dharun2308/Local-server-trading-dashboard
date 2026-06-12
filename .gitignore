@@ -5,6 +5,9 @@ key.pem
 # Runtime data (accumulates on the server)
 iv_history.json
 fills.json
+core_monitor_cache.json
+core_monitor_state.json
+core_monitor_alert_cron.log
 
 # Python
 __pycache__/
