@@ -650,6 +650,9 @@ select {
   margin-bottom: 4px;
 }
 
+.iv-advice.iv-sell { color: var(--success); }
+.iv-advice.iv-buy { color: var(--accent); }
+
 .iv-text {
   line-height: 1.45;
 }

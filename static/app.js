@@ -971,11 +971,18 @@ async function prepareCc() {
 }
 
 // ── IV rank ──────────────────────────────────────────────────────────────
-// Data only: rank/IV are displayed without trade advice. Colors grade the
-// rank value itself (high/mid/low), not a recommended action.
+// Bands match ivRankCls: ≥70 rich premium (favor selling), <30 cheap premium
+// (favor buying). A heuristic on IV alone — it says nothing about direction.
 function ivRankCls(rank) {
   if (rank == null) return 'iv-neutral';
   return rank >= 70 ? 'iv-sell' : rank < 30 ? 'iv-buy' : 'iv-neutral';
+}
+
+function ivStanceText(rank) {
+  if (rank == null) return null;
+  if (rank >= 70) return 'High IV — good to sell premium (CCs / credit spreads); buying calls is expensive';
+  if (rank < 30) return 'Low IV — good to buy calls / debit spreads; CC premium is thin';
+  return 'Mid IV — no strong edge from IV either way';
 }
 
 // Unique underlying tickers from current positions (OCC = ticker + 15 chars).
@@ -993,7 +1000,8 @@ function renderIvCard(data) {
          <span class="iv-rank-num">${fmt(data.iv_rank, 0)}</span>
          <div class="iv-rank-bar"><div class="iv-rank-fill ${cls}" style="width:${rankPct}%"></div></div>
        </div>
-       <p class="iv-sub">IV range ${fmt(data.history_low, 0)}–${fmt(data.history_high, 0)}% · ${data.history_days}d of history</p>`
+       <p class="iv-sub">IV range ${fmt(data.history_low, 0)}–${fmt(data.history_high, 0)}% · ${data.history_days}d of history</p>
+       <p class="iv-sub iv-advice ${cls}">${ivStanceText(data.iv_rank)}</p>`
     : `<p class="iv-sub">Building history: ${data.history_days}/${data.min_days_for_rank} days — absolute IV only until then.</p>`;
 
   return `
