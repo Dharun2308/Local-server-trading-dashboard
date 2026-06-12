@@ -9,6 +9,7 @@ core_monitor_cache.json
 core_monitor_state.json
 dividend_rate_cache.json
 core_monitor_alert_cron.log
+iv_snapshot_cron.log
 
 # Python
 __pycache__/

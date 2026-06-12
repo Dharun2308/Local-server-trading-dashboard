@@ -115,6 +115,8 @@ const dom = {
   // core monitor
   cmBody: $('#cm-body'),
   cmUpdated: $('#cm-updated'),
+  // scheduled jobs footer
+  cronsResults: $('#crons-results'),
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -1333,6 +1335,38 @@ dom.symInput.addEventListener('keydown', (e) => {
 dom.btnYieldRefresh.addEventListener('click', loadPremiumYield);
 dom.btnFillsRefresh.addEventListener('click', loadFills);
 
+// ── Scheduled jobs footer ──────────────────────────────────────────────
+function cronWhen(ts) {
+  return ts ? ts.slice(5, 16).replace('T', ' ') : '—';
+}
+
+async function loadCrons() {
+  try {
+    const d = await apiFetch('/crons');
+    const jobs = d.jobs || [];
+    if (!jobs.length) {
+      dom.cronsResults.innerHTML = '<p class="text-muted">No scheduled jobs.</p>';
+      return;
+    }
+    const rows = jobs.map((j) => `<tr>
+      <td class="tl">${j.name}</td>
+      <td>${j.schedule}</td>
+      <td class="${j.state === 'scheduled' ? 'positive' : 'cm-warn'}">${j.state || '—'}</td>
+      <td>${cronWhen(j.last_run_at)}${j.last_status ? ` (${j.last_status})` : ''}</td>
+      <td>${cronWhen(j.next_run_at)}</td>
+    </tr>`).join('');
+    dom.cronsResults.innerHTML = `
+      <table class="data-table">
+        <thead><tr>
+          <th class="tl">Job</th><th>Schedule</th><th>State</th><th>Last run</th><th>Next run</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (e) {
+    dom.cronsResults.innerHTML = `<p class="error">Scheduled jobs failed: ${e.message}</p>`;
+  }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────
 loadAccount();
 setInterval(loadAccount, ACCOUNT_REFRESH_MS);
@@ -1340,3 +1374,4 @@ loadPremiumYield();
 loadFills();
 loadCoreMonitor();
 setInterval(loadCoreMonitor, CM_REFRESH_MS);
+loadCrons();

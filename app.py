@@ -700,6 +700,30 @@ def api_premium_yield():
         return jsonify({"error": f"Premium yield failed: {e}"}), 500
 
 
+# ── Scheduled jobs (read-only footer listing) ──────────────────────────
+_HERMES_JOBS_PATH = os.path.expanduser("~/.hermes/cron/jobs.json")
+
+
+@app.route("/api/crons")
+def api_crons():
+    """Hermes scheduled jobs — name/schedule/status only, nothing sensitive."""
+    try:
+        with open(_HERMES_JOBS_PATH) as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return jsonify({"jobs": []})
+    jobs = raw.get("jobs", []) if isinstance(raw, dict) else raw
+    out = [{
+        "name": j.get("name") or j.get("id"),
+        "schedule": j.get("schedule_display") or "",
+        "state": j.get("state") if j.get("enabled") else "paused",
+        "last_run_at": j.get("last_run_at"),
+        "last_status": j.get("last_status"),
+        "next_run_at": j.get("next_run_at"),
+    } for j in jobs]
+    return jsonify({"jobs": out})
+
+
 # ── Core Monitor (Phase 1 — strictly read-only) ────────────────────────
 import core_monitor as _core_monitor
 
