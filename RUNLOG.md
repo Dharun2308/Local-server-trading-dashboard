@@ -71,6 +71,49 @@ Endpoints inspected: `get_accounts`, `get_portfolio` (…/portfolio/v2),
 - LILMF (delisted shell, $0.01 total value) fails preflight with API 400 →
   conservative maintenance 1.0 via config override.
 
+## 2026-06-11 23:16 MDT — Smoke test (:8091, live API, read-only)
+
+Ran via `scripts/smoke_run.py` (urllib3 wire logging → /tmp/smoke_session.log).
+
+- `GET /` 200; new Core Monitor panel + both Phase 0.4 banners in the served HTML.
+- `/api/account`: equity 6927.50, 5 option positions, 17 stocks. Unchanged behavior.
+- `/api/core-monitor` (live numbers, 2026-06-11 23:16):
+  - leverage **1.885** (yellow; target 1.75), gross $13,059.77, equity $6,927.50
+  - **eviction distance 5.4%** — equity $6,927 vs modeled maintenance $6,581.
+    ⚠ This is UNDER the 10% urgent threshold tonight. Driven by AMPX's 100%
+    maintenance rate ($1,739 of fully-haircut collateral) + UPST/BKV/IDR at
+    45–75%. Restore-to-20%: deposit $948.98 or reduce positions $1,573.48.
+  - interest: $24.09/mo est @ 4.9% APR on $5,899 loan; 30d income $76.00
+    (premiums; dividends $0 — real, from history) → **self-funding YES, net +$51.91/mo**
+  - sweep: "pay loan $535.23" (display only)
+- `/api/ivrank`: no `recommendation` key (asserted) — data only.
+- `/api/fills`: per-tag summary present; 9 old rows backfilled to `untagged`.
+- Alert dry-run: correctly classified state ok→urgent and printed the URGENT
+  message with deposit/reduce amounts; sent nothing; state file untouched.
+- Unit tests: 6/6 pass (single, mixed-rates, zero-loan, restore round-trips).
+- **Order-endpoint proof**: every outbound API call in the smoke session log:
+  `GET portfolio/v2` ×3, `GET history` ×3, `GET account` ×1, `POST quotes` ×2,
+  `POST option-chain` ×1, `POST option-expirations` ×1,
+  `POST preflight/single-leg` ×16. Grep for any order/multileg/cancel path:
+  **zero matches.**
+
+**Cross-check vs the Public app (open item for Dharun):** I cannot see the
+app from here. Please compare: (a) the margin rate the app shows vs the 4.9%
+config value; (b) the app's "margin call if portfolio falls X%" / maintenance
+excess vs the panel's 5.4% buffer / $347 excess. Note Public's own buying
+power ($898) implies its house calc may differ from this conservative model
+(short-call liability held constant, real per-symbol maintenance rates).
+
+## Cron
+
+- Alert: hermes cron job `852991ad1e7c` "Core monitor margin alert (after
+  close)", schedule `15 14 * * 1-5` local Mountain = 16:15 ET year-round
+  (MT is always 2h behind ET; both observe DST). Wrapper
+  `~/.hermes/scripts/core-monitor-alert.sh` → repo script; silent on success,
+  delivers failures to origin chat. Expect the first URGENT ping at tomorrow's
+  close unless the buffer recovers above 10%.
+- Deploy: existing hermes job `f35d94d2e58a` pulls origin/main every minute.
+
 ## Assumptions log
 
 1. **(Phase 0.2)** Treated as already-complete per above rather than deleting
@@ -88,3 +131,18 @@ Endpoints inspected: `get_accounts`, `get_portfolio` (…/portfolio/v2),
 4. **(Phase 1)** Effective liability L_eff = −(CASH equity + options value)
    when negative; loan from the CASH equity entry rather than
    max(0, gross−equity) since the API exposes cash directly.
+5. **(Phase 0.3)** Added `contracts` to the fill schema alongside
+   `strategy_tag` — the per-tag dollar summary needs it (premium = final ×
+   100 × contracts). Old rows lack it; treated as 1 contract (all historical
+   runs were 1-lot). The per-tag line is net premium CASH FLOW (credits −
+   debits on filled runs), labeled as such — true P&L of a debit spread isn't
+   knowable at fill time.
+6. **(Phase 1 alerts)** "Once per threshold crossing" implemented as a
+   3-state machine (ok/warn/urgent) persisted in core_monitor_state.json;
+   urgent re-pings at most once per calendar day while under 10%. Send
+   failures leave state unchanged so the next run retries.
+7. **(Phase 1)** Margin-rate-change ping compares config value vs stored
+   state (the API has no rate endpoint); first run baselines silently.
+8. **(Smoke)** `DASHBOARD_PORT` env override added to app.py `__main__` —
+   needed to run the read-only smoke instance on :8091 without touching the
+   production process. Production deploy path (no env set) stays :8090.
