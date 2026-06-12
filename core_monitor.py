@@ -34,6 +34,10 @@ DEFAULT_CONFIG = {
     "margin_rate_source": "public.com published base rate; API does not expose it",
     # Symbols the preflight endpoint can't price (delisted etc.) → conservative 100%.
     "maintenance_overrides": {"LILMF": 1.0},
+    # When every preflight fallback fails and there's no cached rate: assume
+    # this fraction (0.5 = stricter than the 25-30% typical of marginable
+    # large caps, without writing the position off entirely like 1.0 did).
+    "assumed_maintenance_rate": 0.5,
     "sweep_symbol": "SPLG",
 }
 
@@ -66,12 +70,20 @@ def _save_maint_cache(cache: dict) -> None:
     os.replace(tmp, _MAINT_CACHE_PATH)
 
 
-def _preflight_maint_rate(trader, symbol: str, last_price: float):
+def _preflight_maint_rate(trader, symbol: str, last_price: float,
+                          held_qty: float | None = None):
     """Maintenance-margin fraction for one symbol via the preflight estimate.
 
-    BUY 1 share LIMIT@last is a hypothetical used purely to read back
-    margin_requirement.long_maintenance_requirement (a fraction, e.g. 0.25).
-    Nothing is placed. Returns None when the API can't price the symbol.
+    Hypotheticals used purely to read back
+    margin_requirement.long_maintenance_requirement (a fraction, e.g. 0.25);
+    nothing is placed. Tried in order:
+      1. BUY 1 LIMIT@last — fails 400 when the account is fully margined
+         ("you need an additional $X for the initial requirements").
+      2. SELL 1 LIMIT@last — selling held shares needs no buying power;
+         only valid when the position holds at least a whole share.
+      3. SELL held_qty MARKET — fractional positions; the API requires
+         fractional preflights to be market orders.
+    Returns None when every attempt fails (API can't price the symbol).
     """
     from public_api_sdk import (
         OrderInstrument, InstrumentType, OrderSide, OrderType,
@@ -79,40 +91,56 @@ def _preflight_maint_rate(trader, symbol: str, last_price: float):
     )
     from public_api_sdk.models.order import PreflightRequest
 
-    pf = trader.client.perform_preflight_calculation(
-        PreflightRequest(
-            instrument=OrderInstrument(symbol=symbol, type=InstrumentType.EQUITY),
-            order_side=OrderSide.BUY,
-            order_type=OrderType.LIMIT,
-            expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
-            quantity=Decimal("1"),
-            limit_price=Decimal(str(round(last_price, 2))),
-        ),
-        account_id=trader.account_id,
-    )
-    mr = pf.margin_requirement
-    if mr is None or mr.long_maintenance_requirement is None:
-        return None
-    return float(mr.long_maintenance_requirement)
+    attempts = [(OrderSide.BUY, OrderType.LIMIT, Decimal("1"), last_price)]
+    if held_qty:
+        if held_qty >= 1:
+            attempts.append((OrderSide.SELL, OrderType.LIMIT, Decimal("1"), last_price))
+        else:
+            attempts.append((OrderSide.SELL, OrderType.MARKET,
+                             Decimal(str(round(held_qty, 5))), None))
+
+    for side, order_type, qty, px in attempts:
+        try:
+            pf = trader.client.perform_preflight_calculation(
+                PreflightRequest(
+                    instrument=OrderInstrument(symbol=symbol, type=InstrumentType.EQUITY),
+                    order_side=side,
+                    order_type=order_type,
+                    expiration=OrderExpirationRequest(time_in_force=TimeInForce.DAY),
+                    quantity=qty,
+                    limit_price=Decimal(str(round(px, 2))) if px is not None else None,
+                ),
+                account_id=trader.account_id,
+            )
+        except Exception:
+            continue
+        mr = pf.margin_requirement
+        if mr is not None and mr.long_maintenance_requirement is not None:
+            return float(mr.long_maintenance_requirement)
+    return None
 
 
 def get_maintenance_rates(trader, symbols_with_prices: dict, config: dict) -> dict:
     """symbol → {"rate": float, "source": "preflight"|"cache"|"override"|"assumed_max"}.
 
+    symbols_with_prices: symbol → (last_price, held_qty); qty enables the
+    sell-side preflight fallbacks for fully-margined accounts.
+
     Fresh-enough disk cache wins; otherwise preflight; otherwise a stale cache
-    entry; otherwise the config override; otherwise the conservative maximum
-    (1.0 — treat as non-marginable) flagged as "assumed_max" so the UI can
-    show it was not a real number.
+    entry; otherwise the config override; otherwise the configured assumption
+    (assumed_maintenance_rate, default 0.5) flagged as "assumed_max" so the UI
+    can show it was not a real number.
     """
     cache = _load_maint_cache()
     rates_cache = cache.get("rates", {})
     fetched_at = cache.get("fetched_at", 0)
     fresh = (time.time() - fetched_at) < MAINT_CACHE_TTL_SEC
     overrides = config.get("maintenance_overrides", {})
+    assumed = float(config.get("assumed_maintenance_rate", 0.5))
 
     out = {}
     dirty = False
-    for sym, last in symbols_with_prices.items():
+    for sym, (last, qty) in symbols_with_prices.items():
         if fresh and sym in rates_cache:
             out[sym] = {"rate": rates_cache[sym], "source": "cache"}
             continue
@@ -120,7 +148,7 @@ def get_maintenance_rates(trader, symbols_with_prices: dict, config: dict) -> di
             out[sym] = {"rate": float(overrides[sym]), "source": "override"}
             continue
         try:
-            rate = _preflight_maint_rate(trader, sym, last) if last else None
+            rate = _preflight_maint_rate(trader, sym, last, qty) if last else None
         except Exception:
             rate = None
         if rate is not None:
@@ -130,7 +158,7 @@ def get_maintenance_rates(trader, symbols_with_prices: dict, config: dict) -> di
         elif sym in rates_cache:  # stale cache beats guessing
             out[sym] = {"rate": rates_cache[sym], "source": "cache"}
         else:
-            out[sym] = {"rate": 1.0, "source": "assumed_max"}
+            out[sym] = {"rate": assumed, "source": "assumed_max"}
 
     if dirty or not fresh:
         _save_maint_cache({"fetched_at": time.time(), "rates": rates_cache})
@@ -412,8 +440,9 @@ def compute_monitor(trader, config: dict | None = None, fills_path: str | None =
                 "value": float(p.current_value or 0),
             })
 
-    # Maintenance rates: preflight needs a price hint; reuse position marks.
-    sym_prices = {p["symbol"]: (p["value"] / p["qty"] if p["qty"] else None)
+    # Maintenance rates: preflight needs a price hint (reuse position marks)
+    # and the held qty (enables sell-side fallbacks when buying power is gone).
+    sym_prices = {p["symbol"]: ((p["value"] / p["qty"] if p["qty"] else None), p["qty"])
                   for p in stock_positions}
     rates = get_maintenance_rates(trader, sym_prices, config)
     for p in stock_positions:

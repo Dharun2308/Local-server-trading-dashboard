@@ -1222,7 +1222,7 @@ async function loadCoreMonitor() {
           <span class="cm-sub">avg: $${fmt(dv.avg_monthly)}/mo over ${fmt(dv.months_observed, 1)}m</span>
         </div>
       </div>
-      ${assumed.length ? `<p class="cm-sub negative">⚠ ${assumed.map((p) => p.symbol).join(', ')}: maintenance rate unavailable from API — assumed 100% (conservative).</p>` : ''}
+      ${assumed.length ? `<p class="cm-sub negative">⚠ ${assumed.map((p) => p.symbol).join(', ')}: maintenance rate unavailable from API — assumed ${fmt(assumed[0].maint_pct, 0)}% (conservative).</p>` : ''}
       <details class="cm-details"><summary>per-position maintenance rates</summary>
         <table class="data-table"><thead><tr><th class="tl">Symbol</th><th>Value</th><th>Maint</th></tr></thead>
         <tbody>${posRows}</tbody></table>
