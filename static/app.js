@@ -1128,7 +1128,7 @@ async function loadFills() {
       <div class="stat-grid">
         <div class="stat"><span class="stat-num">${s.fill_rate == null ? '—' : fmt(s.fill_rate, 0) + '%'}</span><span class="stat-lbl">fill rate</span></div>
         <div class="stat"><span class="stat-num">${s.avg_cycles == null ? '—' : fmt(s.avg_cycles, 1)}</span><span class="stat-lbl">avg cycles</span></div>
-        <div class="stat"><span class="stat-num">${s.avg_concession == null ? '—' : '$' + fmt(s.avg_concession)}</span><span class="stat-lbl">avg concession</span></div>
+        <div class="stat"><span class="stat-num">${s.avg_concession_mid == null ? '—' : '$' + fmt(s.avg_concession_mid)}</span><span class="stat-lbl">avg concession – mid</span></div>
         <div class="stat"><span class="stat-num">${s.avg_seconds == null ? '—' : fmt(s.avg_seconds, 0) + 's'}</span><span class="stat-lbl">avg fill time</span></div>
       </div>
       <p class="stat-foot">${s.filled} filled of ${s.total} runs</p>
@@ -1138,6 +1138,8 @@ async function loadFills() {
       const oCls = OUTCOME_CLS[r.outcome] || '';
       const conc = r.concession == null ? '—'
         : (r.concession <= 0 ? 'first try' : `$${fmt(r.concession)}`);
+      // Vs launch mid: negative = filled better than fair value.
+      const concMid = r.concession_mid == null ? '—' : `$${fmt(r.concession_mid)}`;
       const when = (r.ts || '').replace('T', ' ').slice(5, 16); // MM-DD HH:MM
       return `<tr>
         <td class="tl">${when}</td>
@@ -1147,13 +1149,14 @@ async function loadFills() {
         <td>${r.final == null ? '—' : '$' + fmt(r.final)}</td>
         <td>${r.cycles ?? '—'}</td>
         <td>${conc}</td>
+        <td>${concMid}</td>
       </tr>`;
     }).join('');
     dom.fillsResults.innerHTML = `
       <table class="data-table">
         <thead><tr>
           <th class="tl">When</th><th>Type</th><th class="tl">Sym</th>
-          <th>Outcome</th><th>Fill</th><th>Cyc</th><th>Concession</th>
+          <th>Outcome</th><th>Fill</th><th>Cyc</th><th>Concession</th><th>Vs mid</th>
         </tr></thead>
         <tbody>${body}</tbody>
       </table>`;

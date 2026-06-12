@@ -481,18 +481,21 @@ def _append_fill(record: dict) -> None:
 
 
 def _log_chaser_result(task_id: str, kind: str, symbol: str, start: float,
-                       bound: float, step: float, direction: str) -> None:
+                       bound: float, step: float, direction: str,
+                       mid_at_start: float | None = None) -> None:
     """Build and store a fill record from a finished chaser task.
 
     Called from each chaser thread's `finally`, so it runs exactly once per
     run regardless of how the thread exited (fill / expire / cancel / error).
 
     Args:
-        kind:      'spread' | 'roll' | 'cc'
-        direction: 'credit' (roll/cc walk price DOWN) or 'debit' (spread walks UP)
-        start:     the user's starting limit (credit or debit)
-        bound:     the floor credit (credit) or price ceiling (debit)
-        step:      increment per cycle
+        kind:         'spread' | 'roll' | 'cc'
+        direction:    'credit' (roll/cc walk price DOWN) or 'debit' (spread walks UP)
+        start:        the user's starting limit (credit or debit)
+        bound:        the floor credit (credit) or price ceiling (debit)
+        step:         increment per cycle
+        mid_at_start: combined mid quote when the chaser launched (fair-value
+                      anchor; the start limit is usually typed by hand)
     """
     task = _chaser_tasks.get(task_id, {})
     status = task.get("status", "UNKNOWN")
@@ -504,6 +507,13 @@ def _log_chaser_result(task_id: str, kind: str, symbol: str, start: float,
     concession = None
     if final is not None and start is not None:
         concession = round((start - final) if direction == "credit" else (final - start), 4)
+
+    # Same drift measured from the launch-time mid: execution cost vs fair
+    # value. Negative = filled better than mid (price improvement).
+    concession_mid = None
+    if final is not None and mid_at_start is not None:
+        concession_mid = round((mid_at_start - final) if direction == "credit"
+                               else (final - mid_at_start), 4)
 
     # Time to resolution, in seconds, from the task's start timestamp.
     duration = None
@@ -526,6 +536,8 @@ def _log_chaser_result(task_id: str, kind: str, symbol: str, start: float,
         "bound": bound,               # floor (credit) or ceiling (debit)
         "final": final,               # price it actually rested/filled at
         "concession": concession,     # unfavorable drift from start
+        "mid_at_start": mid_at_start,
+        "concession_mid": concession_mid,  # unfavorable drift from launch mid
         "step": step,
         "cycles": cycles,
         "duration_sec": duration,
@@ -563,6 +575,7 @@ def api_fills():
         "fill_rate": round(len(fills) / total * 100, 1) if total else None,
         "avg_cycles": _avg([r.get("cycles") for r in fills]),
         "avg_concession": _avg([r.get("concession") for r in fills]),
+        "avg_concession_mid": _avg([r.get("concession_mid") for r in fills]),
         "avg_seconds": _avg([r.get("duration_sec") for r in fills]),
     }
 
@@ -969,6 +982,7 @@ def api_roll_prepare():
         "limit_credit": limit_credit,
         "min_credit": min_credit,
         "increment": str(inc),
+        "mid_credit": est_credit,   # fair-value anchor for the fill log
     }
     _token_created[token] = time.time()
 
@@ -1191,6 +1205,7 @@ def api_cc_prepare():
         if inc not in (Decimal("0.02"), Decimal("0.05")):
             inc = Decimal("0.05")
 
+    cc_leg = _find_call(chain_legs, strike)
     _cc_pending[po.token] = {
         "symbol": symbol,
         "strike": strike,
@@ -1199,6 +1214,7 @@ def api_cc_prepare():
         "limit_credit": limit_credit,
         "min_credit": min_credit,
         "increment": str(inc),
+        "mid_credit": cc_leg["mid"] if cc_leg and cc_leg.get("mid") else None,
     }
     _token_created[po.token] = time.time()
 
@@ -1348,7 +1364,7 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
     outcome to the fill log on exit via `finally`.
     """
     # Logging context — set as values become known; read in `finally`.
-    log_symbol = log_start = log_bound = log_step = None
+    log_symbol = log_start = log_bound = log_step = log_mid = None
     try:
         t = get_trader()
         po = t._pending.get(token)
@@ -1362,6 +1378,8 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
         sell_leg = pf["sell"]
         # Underlying ticker for the fill log (strip the 15-char OCC suffix).
         log_symbol = buy_leg["symbol"][:-15] if len(buy_leg["symbol"]) > 15 else buy_leg["symbol"]
+        if buy_leg.get("mid") and sell_leg.get("mid"):
+            log_mid = round(buy_leg["mid"] - sell_leg["mid"], 4)
 
         from public_api_sdk import (
             MultilegOrderRequest,
@@ -1566,7 +1584,7 @@ def _run_chaser_thread(task_id: str, token: str, max_cap: float = None):
             _chaser_tasks[task_id]["error"] = _categorize_chaser_error(error_msg)
     finally:
         _log_chaser_result(task_id, "spread", log_symbol, log_start,
-                           log_bound, log_step, "debit")
+                           log_bound, log_step, "debit", mid_at_start=log_mid)
 
 
 def _run_roll_chaser_thread(task_id: str, token: str):
@@ -1578,7 +1596,7 @@ def _run_roll_chaser_thread(task_id: str, token: str):
     outcome to the fill log on exit via `finally`.
     """
     # Logging context — set once info is read; logged in `finally`.
-    log_symbol = log_start = log_bound = log_step = None
+    log_symbol = log_start = log_bound = log_step = log_mid = None
     try:
         info = _roll_pending.get(token)
         if not info:
@@ -1605,6 +1623,7 @@ def _run_roll_chaser_thread(task_id: str, token: str):
         step = Decimal(str(info["increment"]))
         log_symbol = info.get("ticker")
         log_start, log_bound, log_step = float(start_credit), float(floor_credit), float(step)
+        log_mid = info.get("mid_credit")
 
         order_id = str(uuid.uuid4())
         req = MultilegOrderRequest(
@@ -1807,7 +1826,7 @@ def _run_roll_chaser_thread(task_id: str, token: str):
         # Release the prepared-roll record and log the outcome.
         _roll_pending.pop(token, None)
         _log_chaser_result(task_id, "roll", log_symbol, log_start,
-                           log_bound, log_step, "credit")
+                           log_bound, log_step, "credit", mid_at_start=log_mid)
 
 
 def _run_cc_chaser_thread(task_id: str, token: str):
@@ -1819,7 +1838,7 @@ def _run_cc_chaser_thread(task_id: str, token: str):
     credit orders, which use negative limits). Records the outcome to the fill
     log on exit via `finally`."""
     # Logging context — set once info is read; logged in `finally`.
-    log_symbol = log_start = log_bound = log_step = None
+    log_symbol = log_start = log_bound = log_step = log_mid = None
     try:
         info = _cc_pending.get(token)
         if not info:
@@ -1845,6 +1864,7 @@ def _run_cc_chaser_thread(task_id: str, token: str):
         step = Decimal(str(info["increment"]))
         log_symbol = info.get("symbol")
         log_start, log_bound, log_step = float(start_credit), float(floor_credit), float(step)
+        log_mid = info.get("mid_credit")
 
         poll_interval = 3                 # how often to check a resting order
         level_rest_secs = 12              # let each credit level rest before conceding
@@ -2028,7 +2048,7 @@ def _run_cc_chaser_thread(task_id: str, token: str):
         # Release the prepared records and log the outcome.
         _cc_pending.pop(token, None)
         _log_chaser_result(task_id, "cc", log_symbol, log_start,
-                           log_bound, log_step, "credit")
+                           log_bound, log_step, "credit", mid_at_start=log_mid)
 
 
 # ── Main ────────────────────────────────────────────────────────────────
