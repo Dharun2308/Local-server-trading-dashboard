@@ -114,6 +114,17 @@ power ($898) implies its house calc may differ from this conservative model
   close unless the buffer recovers above 10%.
 - Deploy: existing hermes job `f35d94d2e58a` pulls origin/main every minute.
 
+## Deploy note (2026-06-12 ~00:30 MDT)
+
+Merged to main locally and pushed. Gotcha discovered: deploy.sh only restarts
+when `git pull` *changes* HEAD — merging locally in the same checkout makes
+the cron's pull a no-op, so it never restarted. Restarted :8090 manually
+(same commands deploy.sh uses); verified the new panel + /api/core-monitor
+live on :8090. This RUNLOG commit is pushed un-merged-locally so the cron
+performs a genuine pull-and-restart, validating the normal deploy path.
+Future merges: push from the branch (`git push origin phase01-monitor:main`)
+or let the cron pull the merge — don't pre-merge the deploy checkout.
+
 ## Assumptions log
 
 1. **(Phase 0.2)** Treated as already-complete per above rather than deleting
