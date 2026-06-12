@@ -89,16 +89,6 @@
         </label>
         <button id="btn-fetch-chain" class="btn primary">Fetch Chain</button>
         <button id="btn-refresh-quote" class="btn">Refresh Quote</button>
-      </div>
-
-      <div id="quote-bar" class="hidden">
-        <span id="quote-symbol"></span>
-        Last: <strong id="quote-last">—</strong>
-        Bid: <span id="quote-bid">—</span>
-        Ask: <span id="quote-ask">—</span>
-      </div>
-
-      <div class="field-row">
         <label>
           Expiration
           <select id="exp-select" disabled>
@@ -106,6 +96,13 @@
           </select>
         </label>
         <button id="btn-load-chain" class="btn primary" disabled>Load Strikes</button>
+      </div>
+
+      <div id="quote-bar" class="hidden">
+        <span id="quote-symbol"></span>
+        Last: <strong id="quote-last">—</strong>
+        Bid: <span id="quote-bid">—</span>
+        Ask: <span id="quote-ask">—</span>
       </div>
 
       <div id="chain-container" class="hidden">

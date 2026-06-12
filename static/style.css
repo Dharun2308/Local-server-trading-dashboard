@@ -119,6 +119,11 @@ section {
   padding: 16px;
 }
 
+/* Scheduled-jobs footer sits outside #main-grid — match its 16px gap. */
+#crons-panel {
+  margin-top: 16px;
+}
+
 section h2 {
   font-size: 1rem;
   font-weight: 600;
