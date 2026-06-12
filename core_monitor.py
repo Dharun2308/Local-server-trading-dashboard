@@ -17,6 +17,8 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(_BASE_DIR, "config", "core_monitor.json")
 _MAINT_CACHE_PATH = os.path.join(_BASE_DIR, "core_monitor_cache.json")
 MAINT_CACHE_TTL_SEC = 12 * 3600   # maintenance rates move rarely; refetch twice a day
+_DIV_RATE_CACHE_PATH = os.path.join(_BASE_DIR, "dividend_rate_cache.json")
+DIV_RATE_CACHE_TTL_SEC = 12 * 3600  # forward dividend rates move rarely too
 
 DEFAULT_CONFIG = {
     "target_leverage": 1.75,
@@ -254,49 +256,100 @@ def sweep_suggestion(gross: float, equity: float, cash: float,
 # ── Income (trailing 30d) ───────────────────────────────────────────────
 
 
-def dividends_30d(trader) -> tuple:
-    """(amount, source) — DIVIDEND transactions from account history (paginated).
+def dividend_summary(trader) -> dict:
+    """30d and average dividend income from account history (one 365d pass).
 
-    Returns the real number when history exposes dividends; (None, ...) on API
-    failure so callers can fall back to a yfinance estimate rather than
-    silently reporting $0.
+    {"income_30d", "avg_monthly", "months_observed", "source"} — income_30d is
+    None on API failure so callers can fall back to a yfinance estimate rather
+    than silently reporting $0. The average divides by months since the
+    earliest transaction of any kind (clamped to [1, 12]) so a young account
+    isn't diluted by months it didn't exist.
     """
     from public_api_sdk.models.history import HistoryRequest
-    start = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)
-    total = 0.0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start = now - datetime.timedelta(days=365)
+    cutoff_30d = now - datetime.timedelta(days=30)
+    total = total_30d = 0.0
+    earliest = None
     try:
         tok, pages = None, 0
-        while pages < 10:
+        while pages < 30:  # API returns short pages (~20 tx) regardless of page_size
             page = trader.client.get_history(
                 HistoryRequest(start=start, page_size=200, next_token=tok),
                 account_id=trader.account_id,
             )
             txs = list(page.transactions or [])
             for tx in txs:
+                ts = getattr(tx, "timestamp", None) or getattr(tx, "created_at", None)
+                if ts and (earliest is None or ts < earliest):
+                    earliest = ts
                 if tx.sub_type and tx.sub_type.value == "DIVIDEND" and tx.net_amount:
-                    total += float(tx.net_amount)
+                    amt = float(tx.net_amount)
+                    total += amt
+                    if ts and ts >= cutoff_30d:
+                        total_30d += amt
             tok = getattr(page, "next_token", None)
             pages += 1
             if not tok or not txs:
                 break
-        return total, "history"
+        months = 12.0
+        if earliest is not None:
+            months = max(1.0, min(12.0, (now - earliest).days / 30.44))
+        return {
+            "income_30d": round(total_30d, 2),
+            "avg_monthly": round(total / months, 2),
+            "months_observed": round(months, 1),
+            "source": "history",
+        }
     except Exception:
-        return None, "history_failed"
+        return {"income_30d": None, "avg_monthly": None,
+                "months_observed": None, "source": "history_failed"}
 
 
 def dividend_estimate_monthly(stock_positions: list) -> float:
     """yfinance fallback: Σ qty × annual dividend rate / 12. Best-effort."""
-    total = 0.0
+    annual = dividend_projected_annual(stock_positions)
+    return round(annual / 12.0, 2) if annual is not None else 0.0
+
+
+def dividend_projected_annual(stock_positions: list):
+    """Forward-looking Σ qty × annual dividend rate (yfinance, disk-cached).
+
+    Per-symbol rates cached like maintenance rates: fresh cache wins, then a
+    live fetch, then a stale entry beats guessing. None when yfinance itself
+    is unavailable. The .info fetch is slow (~1s/ticker) — the cache keeps it
+    to at most twice a day per symbol.
+    """
     try:
         import yfinance as yf
     except Exception:
-        return 0.0
+        return None
+    try:
+        with open(_DIV_RATE_CACHE_PATH) as f:
+            cache = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        cache = {}
+    now = time.time()
+    total, dirty = 0.0, False
     for p in stock_positions:
-        try:
-            rate = yf.Ticker(p["symbol"]).info.get("dividendRate") or 0
-            total += float(p["qty"]) * float(rate) / 12.0
-        except Exception:
-            continue
+        sym = p["symbol"]
+        ent = cache.get(sym)
+        if not ent or (now - ent["ts"]) > DIV_RATE_CACHE_TTL_SEC:
+            try:
+                info = yf.Ticker(sym).info
+                # ETFs omit dividendRate; they report trailingAnnualDividendRate.
+                rate = float(info.get("dividendRate")
+                             or info.get("trailingAnnualDividendRate") or 0)
+            except Exception:
+                rate = ent["rate"] if ent else 0.0  # stale cache beats guessing
+            cache[sym] = {"rate": rate, "ts": now}
+            dirty = True
+        total += float(p["qty"]) * cache[sym]["rate"]
+    if dirty:
+        tmp = _DIV_RATE_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, _DIV_RATE_CACHE_PATH)
     return round(total, 2)
 
 
@@ -381,7 +434,8 @@ def compute_monitor(trader, config: dict | None = None, fills_path: str | None =
     # Interest (estimate — API exposes neither rate nor accrued interest).
     apr = float(config["margin_rate_apr"])
     monthly_interest = round(loan * apr / 12.0, 2)
-    div30, div_source = dividends_30d(trader)
+    divs = dividend_summary(trader)
+    div30, div_source = divs["income_30d"], divs["source"]
     if div30 is None:
         div30 = dividend_estimate_monthly(stock_positions)
         div_source = "yfinance_estimate"
@@ -430,6 +484,13 @@ def compute_monitor(trader, config: dict | None = None, fills_path: str | None =
             "income_30d": income_30d,
             "net_monthly": net_monthly,
             "self_funding": net_monthly >= 0,
+        },
+        "dividends": {
+            "income_30d": round(div30, 2),
+            "source": div_source,
+            "avg_monthly": divs["avg_monthly"],
+            "months_observed": divs["months_observed"],
+            "projected_annual": dividend_projected_annual(stock_positions),
         },
         "sweep": sweep,
         "warn_buffer_pct": round(config["warn_buffer"] * 100, 1),

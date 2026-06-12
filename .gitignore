@@ -7,6 +7,7 @@ iv_history.json
 fills.json
 core_monitor_cache.json
 core_monitor_state.json
+dividend_rate_cache.json
 core_monitor_alert_cron.log
 
 # Python
